@@ -184,6 +184,10 @@ class FlagGemsBackend(Backend):
             print("Using FlagGems attention backend.")
             return "vllm_fl.dispatch.backends.flaggems.impl.attention.AttentionFLBackend"
 
+        from vllm.platforms import current_platform
+        if getattr(current_platform, "vendor_name", None) == "iluvatar":
+            return "vllm_fl.dispatch.backends.flaggems.impl.iluvatar_paged_prefill.IluvatarPagedPrefillBackend"
+
         return AttentionBackendEnum.TRITON_ATTN.get_path()
 
     def moe_align_block_size(

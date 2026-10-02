@@ -267,7 +267,24 @@ class PlatformFL(Platform):
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
     ) -> str:
-        """Get the attention backend class path using the dispatch mechanism."""
+        """Honor explicit backend requests; otherwise retain the policy dispatch chain."""
+        if selected_backend is not None:
+            try:
+                backend_class = selected_backend.get_class()
+                reasons = backend_class.validate_configuration(
+                    **attn_selector_config._asdict(),
+                    device_capability=cls.get_device_capability(),
+                )
+            except (ImportError, AttributeError, TypeError) as exc:
+                raise ValueError(
+                    f"Explicit attention backend {selected_backend} cannot be used: {exc}"
+                ) from exc
+            if reasons:
+                raise ValueError(
+                    f"Explicit attention backend {selected_backend} is incompatible: {reasons}"
+                )
+            return selected_backend.get_path()
+
         from vllm_fl.dispatch import call_op
 
         use_mla = attn_selector_config.use_mla
