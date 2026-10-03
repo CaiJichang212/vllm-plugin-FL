@@ -248,6 +248,9 @@ class FlashAttentionMetadata:
 
     causal: bool = True
 
+    # Exact cumulative KV lengths, owned by this batch and shared across layers.
+    prefill_cu_seq_lens_k: torch.Tensor | None = None
+
 
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
@@ -435,8 +438,11 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             decode_block_table_tensor = None
 
         if num_prefills > 0:
+            prefill_seq_lens_cpu = common_attn_metadata.seq_lens_cpu[
+                num_decodes:num_reqs
+            ]
             prefill_max_seq_len = int(
-                common_attn_metadata.seq_lens_cpu[num_decodes:num_reqs].max()
+                prefill_seq_lens_cpu.max()
             )
             prefill_query_start_loc = (
                 common_attn_metadata.query_start_loc[num_decodes : num_reqs + 1]
@@ -446,11 +452,27 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefill_block_table_tensor = common_attn_metadata.block_table_tensor[
                 num_decodes:num_reqs
             ]
+            # Use exact KV lengths (including cached tokens), not query lengths
+            # or async scheduling upper bounds. Each build owns a fresh tensor.
+            cu_seq_lens_k_cpu = torch.empty(
+                num_prefills + 1, dtype=torch.int64, device="cpu"
+            )
+            cu_seq_lens_k_cpu[0] = 0
+            torch.cumsum(
+                prefill_seq_lens_cpu, dim=0, dtype=torch.int64,
+                out=cu_seq_lens_k_cpu[1:],
+            )
+            if cu_seq_lens_k_cpu[-1].item() > torch.iinfo(torch.int32).max:
+                raise ValueError("Cumulative prefill KV lengths exceed int32 range")
+            prefill_cu_seq_lens_k = cu_seq_lens_k_cpu.to(
+                device=prefill_seq_lens.device, dtype=torch.int32
+            )
         else:
             prefill_max_seq_len = 0
             prefill_query_start_loc = None
             prefill_seq_lens = None
             prefill_block_table_tensor = None
+            prefill_cu_seq_lens_k = None
         # \------------------------- Metax Modification -------------------------/
 
         if _bi_mode:
@@ -584,6 +606,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefill_query_start_loc=prefill_query_start_loc,
             prefill_max_seq_len=prefill_max_seq_len,
             prefill_seq_lens=prefill_seq_lens,
+            prefill_cu_seq_lens_k=prefill_cu_seq_lens_k,
             prefill_block_table=prefill_block_table_tensor,
             # \------------------------- Metax Modification -------------------------/
             block_table=block_table_tensor,
@@ -798,11 +821,7 @@ class FlashAttentionImpl(AttentionImpl):
                 # For handling prefill decode split
                 num_decode_tokens = attn_metadata.num_decode_tokens
                 if attn_metadata.num_prefills > 0:
-                    cu_prefix_kv_lens = torch.tensor(
-                        [0] + attn_metadata.prefill_seq_lens.tolist(),
-                        device=attn_metadata.prefill_seq_lens.device,
-                        dtype=torch.int32,
-                    ).cumsum(dim=0, dtype=torch.int32)
+                    assert attn_metadata.prefill_cu_seq_lens_k is not None
                     output[num_decode_tokens:num_actual_tokens] = (
                         flash_attn_varlen_func(
                             q=query[num_decode_tokens:num_actual_tokens],
@@ -810,7 +829,7 @@ class FlashAttentionImpl(AttentionImpl):
                             v=value_cache,
                             block_table=attn_metadata.prefill_block_table,
                             cu_seqlens_q=attn_metadata.prefill_query_start_loc,
-                            cu_seqlens_k=cu_prefix_kv_lens,
+                            cu_seqlens_k=attn_metadata.prefill_cu_seq_lens_k,
                             max_seqlen_q=attn_metadata.max_query_len,
                             max_seqlen_k=attn_metadata.prefill_max_seq_len,
                             softmax_scale=self.scale,
