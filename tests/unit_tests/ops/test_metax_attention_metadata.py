@@ -60,6 +60,7 @@ def common(query_lens, seq_lens, device="cpu", cpu_copy=True):
     ([1, 1], [512, 700], None),
     ([1, 0], [512, 0], None),
     ([128, 129], [512, 513], [0, 513]),
+    ([1, 2, 3], [101, 202, 303], [0, 202, 505]),
 ])
 def test_partition_and_exact_kv_lengths(query_lens, seq_lens, expected):
     metadata = builder().build(0, common(query_lens, seq_lens))
@@ -224,3 +225,21 @@ def test_uniform_decode_graph_replay():
         torch.cuda.synchronize()
         torch.testing.assert_close(output, expected, atol=0, rtol=0)
         torch.testing.assert_close(cache, expected_cache, atol=0, rtol=0)
+
+
+def test_real_microbatch_slicing_and_group_ownership():
+    from vllm.v1.worker.ubatch_utils import UBatchSlice, split_attn_metadata
+
+    cm = common([512, 256], [1024, 901])
+    slices = split_attn_metadata([
+        UBatchSlice(slice(0, 1), slice(0, 256)),
+        UBatchSlice(slice(0, 2), slice(256, 768)),
+    ], cm)
+    build = builder()
+    first, second = [build.build(0, x) for x in slices]
+    other_group = builder().build(0, slices[0])
+    assert first.prefill_cu_seq_lens_k.tolist() == [0, 768]
+    assert second.prefill_cu_seq_lens_k.tolist() == [0, 1024, 1925]
+    assert cm.seq_lens.tolist() == [1024, 901]
+    assert len({x.prefill_cu_seq_lens_k.data_ptr()
+                for x in (first, second, other_group)}) == 3
