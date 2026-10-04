@@ -173,6 +173,14 @@ def register_model():
 
     _register_gdn_packed_decode_patch()
 
+    from vllm_fl.utils import DeviceInfo
+    if DeviceInfo().vendor_name == "metax":
+        from vllm import ModelRegistry
+        ModelRegistry.register_model(
+            "LlamaForCausalLM",
+            "vllm_fl.models.minicpm5_rope_kv:MiniCPM5RopeKVForCausalLM",
+        )
+
     # Register GLM-5 (GlmMoeDsa) — config not yet upstream
     try:
         from vllm.transformers_utils.config import _CONFIG_REGISTRY

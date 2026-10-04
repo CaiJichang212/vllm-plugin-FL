@@ -702,6 +702,8 @@ class FlashAttentionImpl(AttentionImpl):
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
+        *,
+        cache_already_written: bool = False,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -762,7 +764,8 @@ class FlashAttentionImpl(AttentionImpl):
         # calculated once based on the output from the encoder and then cached
         # in KV cache.
         if (
-            self.kv_sharing_target_layer_name is None
+            not cache_already_written
+            and self.kv_sharing_target_layer_name is None
             and key is not None
             and value is not None
         ):
