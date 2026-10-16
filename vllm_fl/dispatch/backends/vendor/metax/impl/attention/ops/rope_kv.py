@@ -120,11 +120,6 @@ def fused_rope_cache(q, k, v, positions, cos, sin, key_cache, value_cache,
         _check_layout(tensor, name)
     if tokens:
         with torch.cuda.device(q.device):
-            _rope_cache[(tokens,)](
-                q, k, v, positions, cos, sin, key_cache, value_cache, slot_mapping,
-                *q.stride(), *k.stride(), *v.stride(), positions.stride(0),
-                *cos.stride(), *sin.stride(), slot_mapping.stride(0),
-                *key_cache.stride(), *value_cache.stride(),
-                slot_mapping.numel(), key_cache.shape[0] * 16, cos.shape[0],
-                num_warps=num_warps, enable_fp_fusion=True)
+            from .rope_kv_launch import launch
+            launch(_rope_cache, tensors, tokens, num_warps)
     return q
