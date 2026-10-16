@@ -704,6 +704,7 @@ class FlashAttentionImpl(AttentionImpl):
         output_block_scale: torch.Tensor | None = None,
         *,
         cache_already_written: bool = False,
+        _cache_views: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -758,7 +759,14 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         # For decoder and cross-attention, use KV cache as before
-        key_cache, value_cache = kv_cache.unbind(0)
+        # Internal fused caller already created these views from this exact
+        # cache in this invocation. Keep them local; never cache tensor handles.
+        if _cache_views is None:
+            key_cache, value_cache = kv_cache.unbind(0)
+        else:
+            if not cache_already_written:
+                raise ValueError("KV views require the fused cache-write path")
+            key_cache, value_cache = _cache_views
 
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached

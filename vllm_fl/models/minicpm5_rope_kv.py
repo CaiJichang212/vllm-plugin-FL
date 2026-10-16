@@ -68,7 +68,7 @@ def fused_attention(positions, query, key, value, table, output, layer_name):
     fused_rope_cache(query,key,value,positions.flatten(),cosine,sine,
                      key_cache,value_cache,metadata.slot_mapping,num_warps=NUM_WARPS)
     layer.impl.forward(layer,query,key,value,cache,metadata,output=output,
-                       cache_already_written=True)
+                       cache_already_written=True, _cache_views=(key_cache, value_cache))
     trace(layer_name,'fused')
 
 
