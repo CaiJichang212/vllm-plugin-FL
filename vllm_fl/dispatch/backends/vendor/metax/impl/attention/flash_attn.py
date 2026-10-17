@@ -24,6 +24,7 @@ from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 # Note: use Maca's merge_attn_states to get cuda kernel invoked
 # --------------------------------------------------------------
 from .ops.merge_attn_states import merge_attn_states
+from .ops.decode_output import try_decode_into
 from .utils.fa_utils import (
     flash_attn_supports_fp8,
     get_flash_attn_version,
@@ -857,6 +858,15 @@ class FlashAttentionImpl(AttentionImpl):
                     decode_query = reshape_query_for_spec_decode(
                         decode_query, attn_metadata.num_decodes
                     )
+                    if try_decode_into(
+                        flash_attn_with_kvcache, decode_query, key_cache,
+                        value_cache, output[:num_decode_tokens],
+                        attn_metadata.decode_block_table,
+                        attn_metadata.decode_seq_lens, self.scale,
+                        self.sliding_window, self.alibi_slopes,
+                        self.logits_soft_cap, self.sinks,
+                    ):
+                        return output
                     output_unreshape = flash_attn_with_kvcache(
                         q=decode_query,
                         k_cache=key_cache,
