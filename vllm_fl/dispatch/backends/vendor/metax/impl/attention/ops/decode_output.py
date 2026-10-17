@@ -71,7 +71,10 @@ def try_decode_into(public, q, k_cache, v_cache, output, block_table,
     # The pinned C++ entry folds eight Q heads into seqlen before checking
     # out.shape. Give it the corresponding strided view of ordinary head
     # order, so restoring [B,1,16,128] is a view rather than a result copy.
-    destination = output.view(q.shape[0], 2, 8, 128).transpose(1, 2)
+    # The already validated contiguous destination has ordinary Q-head order.
+    # Construct the identical folded view directly; retain its storage offset.
+    destination = output.as_strided((q.shape[0], 8, 2, 128),
+                                    (2048, 128, 1024, 1))
     # Positional ABI matches this installed FA2 wrapper, including out at13.
     # k/v=None: this call only reads the already updated KV cache.
     result, _ = fa.flash_attn_cuda.fwd_kvcache(
