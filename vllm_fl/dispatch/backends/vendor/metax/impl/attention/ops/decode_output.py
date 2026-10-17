@@ -32,9 +32,18 @@ def _count(label):
         _local.counts[label] += 1
 
 
-def _interval(t):
-    # Only positive-stride supported tensors reach this check.
-    return t.data_ptr(), t.data_ptr() + (1 + sum((n-1)*s for n, s in zip(t.shape, t.stride()))) * t.element_size()
+def _interval(t, shape, stride=None):
+    # Positive strides are validated before aliases. Reuse metadata only within
+    # this call; data_ptr already includes any nonzero storage offset.
+    begin = t.data_ptr()
+    if stride is None:
+        stride = t.stride()
+    return begin, begin + (1 + sum((n-1)*s for n, s in zip(shape, stride))) * t.element_size()
+
+
+def _disjoint(begin, end, t, shape, stride=None):
+    a, b = _interval(t, shape, stride)
+    return end <= a or begin >= b
 
 
 def try_decode_into(public, q, k_cache, v_cache, output, block_table,
@@ -48,23 +57,28 @@ def try_decode_into(public, q, k_cache, v_cache, output, block_table,
                  and all(type(t) is torch.Tensor for t in
                          (q, k_cache, v_cache, output, block_table, cache_seqlens)))
     if supported:
-        supported = (q.ndim == 4 and 1 <= q.shape[0] <= 8 and tuple(q.shape[1:]) == (1, 16, 128)
-                     and tuple(output.shape) == (q.shape[0], 16, 128)
-                     and k_cache.ndim == 4 and tuple(k_cache.shape[1:]) == (16, 2, 128)
-                     and k_cache.shape[0] > 0 and v_cache.shape == k_cache.shape
-                     and block_table.ndim == 2 and block_table.shape[0] == q.shape[0]
-                     and cache_seqlens.shape == (q.shape[0],)
-                     and q.device.type == 'cuda'
-                     and all(t.device == q.device for t in (k_cache, v_cache, output, block_table, cache_seqlens))
+        # Assignment expressions retain the original short-circuit order.
+        # Only ordinary Tensors reach here; nothing survives this invocation.
+        supported = (q.ndim == 4 and 1 <= (q_shape := q.shape)[0] <= 8 and tuple(q_shape[1:]) == (1, 16, 128)
+                     and tuple(output_shape := output.shape) == (q_shape[0], 16, 128)
+                     and k_cache.ndim == 4 and tuple((k_shape := k_cache.shape)[1:]) == (16, 2, 128)
+                     and k_shape[0] > 0 and (v_shape := v_cache.shape) == k_shape
+                     and block_table.ndim == 2 and (table_shape := block_table.shape)[0] == q_shape[0]
+                     and (lens_shape := cache_seqlens.shape) == (q_shape[0],)
+                     and (q_device := q.device).type == 'cuda'
+                     and all(t.device == q_device for t in (k_cache, v_cache, output, block_table, cache_seqlens))
                      and all(t.dtype == torch.bfloat16 and not t.requires_grad for t in (q, k_cache, v_cache, output))
                      and block_table.dtype == cache_seqlens.dtype == torch.int32
                      and output.is_contiguous() and k_cache.is_contiguous() and v_cache.is_contiguous()
-                     and q.stride(-1) == block_table.stride(-1) == cache_seqlens.stride(-1) == 1
-                     and all(s > 0 for t in (q, block_table, cache_seqlens) for s in t.stride()))
+                     and (q_stride := q.stride())[-1] == (table_stride := block_table.stride())[-1] == (lens_stride := cache_seqlens.stride())[-1] == 1
+                     and all(s > 0 for stride in (q_stride, table_stride, lens_stride) for s in stride))
     if supported:
-        begin, end = _interval(output)
-        supported = all(end <= a or begin >= b for a, b in
-                        (_interval(t) for t in (q, k_cache, v_cache, block_table, cache_seqlens)))
+        begin, end = _interval(output, output_shape)
+        supported = (_disjoint(begin, end, q, q_shape, q_stride)
+                     and _disjoint(begin, end, k_cache, k_shape)
+                     and _disjoint(begin, end, v_cache, v_shape)
+                     and _disjoint(begin, end, block_table, table_shape, table_stride)
+                     and _disjoint(begin, end, cache_seqlens, lens_shape, lens_stride))
     if not supported:
         _count('fallback')
         return False
@@ -73,7 +87,7 @@ def try_decode_into(public, q, k_cache, v_cache, output, block_table,
     # order, so restoring [B,1,16,128] is a view rather than a result copy.
     # The already validated contiguous destination has ordinary Q-head order.
     # Construct the identical folded view directly; retain its storage offset.
-    destination = output.as_strided((q.shape[0], 8, 2, 128),
+    destination = output.as_strided((q_shape[0], 8, 2, 128),
                                     (2048, 128, 1024, 1))
     # Positional ABI matches this installed FA2 wrapper, including out at13.
     # k/v=None: this call only reads the already updated KV cache.
@@ -81,7 +95,7 @@ def try_decode_into(public, q, k_cache, v_cache, output, block_table,
         q, k_cache, v_cache, None, None, cache_seqlens,
         None, None, None, None, block_table, None, destination,
         scale, True, -1, -1, 0.0, True, 0, None)
-    if result.data_ptr() != output.data_ptr():
+    if result.data_ptr() != begin:
         raise RuntimeError('pinned FA2 optional output did not return destination storage')
     _count('hit')
     return True
