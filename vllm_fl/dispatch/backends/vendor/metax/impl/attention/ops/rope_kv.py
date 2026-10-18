@@ -27,7 +27,7 @@ def _rope_cache(Q, K, V, POS, COS, SIN, KC, VC, SLOT,
                 VCP: tl.constexpr, VCT: tl.constexpr,
                 VCH: tl.constexpr, VCD: tl.constexpr,
                 NSLOTS: tl.constexpr, CAPACITY: tl.constexpr,
-                MAXPOS: tl.constexpr):
+                MAXPOS: tl.constexpr, SIN_OFFSET: tl.constexpr = 0):
     token = tl.program_id(0)
     pos = tl.load(POS + token * PS).to(tl.int64)
     valid_pos = (pos >= 0) & (pos < MAXPOS)
@@ -36,7 +36,7 @@ def _rope_cache(Q, K, V, POS, COS, SIN, KC, VC, SLOT,
     rotated = (d + 64) % 128
     cosine = tl.load(COS + pos * CS + (d % 64) * CD,
                      mask=valid_pos, other=0).to(tl.float32)
-    sine = tl.load(SIN + pos * SS + (d % 64) * SD,
+    sine = tl.load(SIN + SIN_OFFSET + pos * SS + (d % 64) * SD,
                    mask=valid_pos, other=0).to(tl.float32)
     sine = tl.where(rotated < 64, sine, -sine)
     # A complete token belongs to one CTA. Both halves of every Q head are
@@ -81,8 +81,8 @@ def _check_layout(tensor, name):
             span += (size - 1) * stride
 
 
-def fused_rope_cache(q, k, v, positions, cos, sin, key_cache, value_cache,
-                     slot_mapping, *, num_warps=4):
+def _fused_rope_cache(q, k, v, positions, cos, sin, key_cache, value_cache,
+                     slot_mapping, *, num_warps=4, whole_table=False):
     """Rotate Q in place and write rotated K / exact V to page16 NHD caches.
 
     Static validation only; see module docstring for caller-owned value and
@@ -104,7 +104,7 @@ def fused_rope_cache(q, k, v, positions, cos, sin, key_cache, value_cache,
     if (key_cache.ndim != 4 or key_cache.shape[1:] != (16, 2, 128)
             or value_cache.shape != key_cache.shape or key_cache.shape[0] == 0):
         raise ValueError("caches must have matching shape [pages,16,2,128]")
-    if (cos.ndim != 2 or cos.shape[1] != 64 or cos.shape[0] == 0
+    if (cos.ndim != 2 or cos.shape[1] != (128 if whole_table else 64) or cos.shape[0] == 0
             or sin.shape != cos.shape
             or cos.dtype not in (torch.bfloat16, torch.float16, torch.float32)
             or sin.dtype != cos.dtype):
@@ -126,5 +126,42 @@ def fused_rope_cache(q, k, v, positions, cos, sin, key_cache, value_cache,
                 *cos.stride(), *sin.stride(), slot_mapping.stride(0),
                 *key_cache.stride(), *value_cache.stride(),
                 slot_mapping.numel(), key_cache.shape[0] * 16, cos.shape[0],
+                SIN_OFFSET=64 * cos.stride(1) if whole_table else 0,
                 num_warps=num_warps, enable_fp_fusion=True)
     return q
+
+
+def fused_rope_cache(q, k, v, positions, cos, sin, key_cache, value_cache,
+                     slot_mapping, *, num_warps=4):
+    """Original split-table ABI; unchanged validation and zero sine offset."""
+    return _fused_rope_cache(q, k, v, positions, cos, sin, key_cache,
+                             value_cache, slot_mapping, num_warps=num_warps)
+
+
+def _table_supported(table, *tensors):
+    """Static whole-table domain; unsupported input falls back before launch.
+
+    Tensor pointers already include storage_offset. Row/column strides describe
+    the full [positions,128] table, including padding and nonzero offsets.
+    """
+    if any(type(t) is not torch.Tensor for t in (table, *tensors)):
+        return False
+    if (table.ndim != 2 or table.shape[1] != 128 or not table.shape[0]
+            or table.dtype not in (torch.bfloat16, torch.float16, torch.float32)):
+        return False
+    try:
+        _check_layout(table, 'table')
+    except ValueError:
+        return False
+    return True
+
+
+def _fused_rope_cache_table(q, k, v, positions, table, key_cache, value_cache,
+                            slot_mapping, *, num_warps=8):
+    """Private same-kernel path: sin begins64 column strides after cos."""
+    if not _table_supported(table, q, k, v, positions, key_cache,
+                            value_cache, slot_mapping):
+        raise ValueError('unsupported whole RoPE table')
+    return _fused_rope_cache(q, k, v, positions, table, table, key_cache,
+                             value_cache, slot_mapping, num_warps=num_warps,
+                             whole_table=True)

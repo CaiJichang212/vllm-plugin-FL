@@ -13,7 +13,7 @@ from vllm.model_executor.models.llama import LlamaAttention, LlamaDecoderLayer, 
 from vllm.v1.attention.backend import AttentionType
 
 from vllm_fl.dispatch.backends.vendor.metax.impl.attention.flash_attn import FlashAttentionImpl
-from vllm_fl.dispatch.backends.vendor.metax.impl.attention.ops.rope_kv import fused_rope_cache
+from vllm_fl.dispatch.backends.vendor.metax.impl.attention.ops.rope_kv import fused_rope_cache, _fused_rope_cache_table, _table_supported
 
 NUM_WARPS = 8
 
@@ -63,10 +63,17 @@ def trace(layer, path, reason=None):
 def fused_attention(positions, query, key, value, table, output, layer_name):
     """KV transfer wait precedes BOTH cache insertion and attention."""
     metadata, layer, cache, _ = get_attention_context(layer_name)
-    cosine, sine = table.chunk(2,dim=-1)
     key_cache,value_cache=cache.unbind(0)
-    fused_rope_cache(query,key,value,positions.flatten(),cosine,sine,
-                     key_cache,value_cache,metadata.slot_mapping,num_warps=NUM_WARPS)
+    flat_positions = positions.flatten()
+    if _table_supported(table, query, key, value, flat_positions,
+                        key_cache, value_cache, metadata.slot_mapping):
+        _fused_rope_cache_table(query,key,value,flat_positions,table,
+                               key_cache,value_cache,metadata.slot_mapping,
+                               num_warps=NUM_WARPS)
+    else:
+        cosine, sine = table.chunk(2,dim=-1)
+        fused_rope_cache(query,key,value,flat_positions,cosine,sine,
+                         key_cache,value_cache,metadata.slot_mapping,num_warps=NUM_WARPS)
     layer.impl.forward(layer,query,key,value,cache,metadata,output=output,
                        cache_already_written=True, _cache_views=(key_cache, value_cache))
     trace(layer_name,'fused')
