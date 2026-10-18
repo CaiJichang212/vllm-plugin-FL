@@ -25,6 +25,7 @@ from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 # --------------------------------------------------------------
 from .ops.merge_attn_states import merge_attn_states
 from .ops.decode_output import try_decode_into
+from .ops.prefill_output import try_prefill_into
 from .utils.fa_utils import (
     flash_attn_supports_fp8,
     get_flash_attn_version,
@@ -834,24 +835,36 @@ class FlashAttentionImpl(AttentionImpl):
                 num_decode_tokens = attn_metadata.num_decode_tokens
                 if attn_metadata.num_prefills > 0:
                     assert attn_metadata.prefill_cu_seq_lens_k is not None
-                    output[num_decode_tokens:num_actual_tokens] = (
-                        flash_attn_varlen_func(
-                            q=query[num_decode_tokens:num_actual_tokens],
-                            k=key_cache,
-                            v=value_cache,
-                            block_table=attn_metadata.prefill_block_table,
-                            cu_seqlens_q=attn_metadata.prefill_query_start_loc,
-                            cu_seqlens_k=attn_metadata.prefill_cu_seq_lens_k,
-                            max_seqlen_q=attn_metadata.max_query_len,
-                            max_seqlen_k=attn_metadata.prefill_max_seq_len,
-                            softmax_scale=self.scale,
-                            causal=attn_metadata.causal,
-                            window_size=self.sliding_window,
-                            alibi_slopes=self.alibi_slopes,
-                            softcap=self.logits_soft_cap,
-                            s_aux=self.sinks,
+                    if not try_prefill_into(
+                        flash_attn_varlen_func,
+                        query[num_decode_tokens:num_actual_tokens], key_cache,
+                        value_cache, output[num_decode_tokens:num_actual_tokens],
+                        attn_metadata.prefill_block_table,
+                        attn_metadata.prefill_query_start_loc,
+                        attn_metadata.prefill_cu_seq_lens_k,
+                        attn_metadata.max_query_len,
+                        attn_metadata.prefill_max_seq_len, self.scale,
+                        attn_metadata.causal, self.sliding_window,
+                        self.alibi_slopes, self.logits_soft_cap, self.sinks,
+                    ):
+                        output[num_decode_tokens:num_actual_tokens] = (
+                            flash_attn_varlen_func(
+                                q=query[num_decode_tokens:num_actual_tokens],
+                                k=key_cache,
+                                v=value_cache,
+                                block_table=attn_metadata.prefill_block_table,
+                                cu_seqlens_q=attn_metadata.prefill_query_start_loc,
+                                cu_seqlens_k=attn_metadata.prefill_cu_seq_lens_k,
+                                max_seqlen_q=attn_metadata.max_query_len,
+                                max_seqlen_k=attn_metadata.prefill_max_seq_len,
+                                softmax_scale=self.scale,
+                                causal=attn_metadata.causal,
+                                window_size=self.sliding_window,
+                                alibi_slopes=self.alibi_slopes,
+                                softcap=self.logits_soft_cap,
+                                s_aux=self.sinks,
+                            )
                         )
-                    )
                 if attn_metadata.num_decodes > 0:
                     # Use flash_attn_with_kvcache for normal decoding.
                     decode_query = query[:num_decode_tokens]
