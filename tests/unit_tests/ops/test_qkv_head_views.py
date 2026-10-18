@@ -22,7 +22,7 @@ def load():
 class Views(unittest.TestCase):
     def test_independent_address_map_and_alias(self):
         helper=load()['_qkv_head_views']
-        for m in (1,4,8,15,16,17,1023,1024,1025):
+        for m in (2,4,8,15,16,17,1023,1024,1025):
             for padding,offset in ((0,0),(37,11)):
                 with self.subTest(m=m,padding=padding,offset=offset):
                     stride=2560+padding
@@ -53,9 +53,19 @@ class Views(unittest.TestCase):
         helper=load()['_qkv_head_views']
         class Sub(torch.Tensor):pass
         base=torch.empty(4,2560,dtype=torch.bfloat16)
-        for x in (base.as_subclass(Sub),base.float(),base[:,::2],base.t(),base[:0],base[:,:2559],
+        for x in (base.as_subclass(Sub),base[:1],base.float(),base[:,::2],base.t(),base[:0],base[:,:2559],
                   base.as_strided((4,2560),(1,1)),base.expand(2,4,2560)):
             self.assertIsNone(helper(x))
+
+    def test_singleton_original_strides(self):
+        helper=load()['_qkv_head_views']
+        for padding,offset in ((0,0),(37,11)):
+            backing=torch.empty(2560+padding+offset,dtype=torch.bfloat16)
+            x=backing.as_strided((1,2560),(2560+padding,1),offset)
+            self.assertIsNone(helper(x))
+            q,k,v=x.split((2048,256,256),dim=-1)
+            for t,h in zip((q,k,v),(16,2,2)):
+                self.assertEqual(t.view(-1,h,128).stride(),(h*128,128,1))
 
     def test_forward_supported_and_separated_shapes(self):
         ns=load();x=torch.randn(4,2560,dtype=torch.bfloat16)

@@ -76,11 +76,11 @@ def _qkv_head_views(qkv):
     """Return alias-only head views, or None to retain the original layout path.
 
     A padded row stride and a nonzero storage offset are valid: only the
-    contiguous final dimension is split. Empty inputs retain the original
+    contiguous final dimension is split. Singleton and empty inputs retain the original
     inferred-dimension behavior, and subclasses retain their own dispatch.
     """
     if (type(qkv) is not torch.Tensor or qkv.dtype != torch.bfloat16
-            or qkv.ndim != 2 or qkv.shape[0] == 0 or qkv.shape[1] != 2560
+            or qkv.ndim != 2 or qkv.shape[0] < 2 or qkv.shape[1] != 2560
             or qkv.stride(1) != 1 or qkv.stride(0) < 2560):
         return None
     return qkv.view(qkv.shape[0], 20, 128).split((16, 2, 2), dim=1)
