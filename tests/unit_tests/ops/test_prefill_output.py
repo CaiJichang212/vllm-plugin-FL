@@ -46,6 +46,12 @@ class Tests(unittest.TestCase):
         self.assertEqual(c[:6],tuple(self.args[1:5]+self.args[6:8]))
         self.assertEqual(c[6:10],(None,None,self.args[5],None))
         self.assertEqual(c[10:],(1024,4096,0.,128**-.5,False,True,-1,-1,0.,False,None,None,False))
+    def test_actual_small_prefill_tail_and_single_query_fallback(self):
+        for n in (2,4,15,16,17):
+            args=list(self.args);args[1]=Tensor((n,16,128));args[4]=Tensor((n,16,128));args[8]=n
+            self.assertTrue(self.m.try_prefill_into(*args))
+        args=list(self.args);args[8]=1
+        before=len(self.calls);self.assertFalse(self.m.try_prefill_into(*args));self.assertEqual(len(self.calls),before)
     def test_rejections_do_not_submit(self):
         values=[(0,lambda:None),(1,Tensor((0,16,128))),(1,Tensor((1020,16,128),'fp16')),(4,Tensor((1020,16,128),strides=(4096,128,1))),(5,Tensor((4,256),'i64')),(6,Tensor((4,),'i32')),(8,0),(9,16385),(12,(16,0)),(13,object()),(14,1.),(15,object())]
         for index,value in values:

@@ -49,9 +49,9 @@ def try_prefill_into(public, q, k, v, output, table, cu_q, cu_k,
                  and alibi is None and sinks is None and softcap == 0.0
                  and window == (-1, -1) and type(causal) is bool
                  and type(max_q) is int and type(max_k) is int
-                 # The backend routes <=128-query requests through its decode path.
-                 # Keep small varlen/GQA layouts on the public fallback.
-                 and 128 < max_q <= 8192 and 0 < max_k <= 16384
+                 # A scheduled prefill tail may be smaller than the reorder threshold.
+                 # Keep single-query varlen/GQA layouts on the public fallback.
+                 and 1 < max_q <= 8192 and 0 < max_k <= 16384
                  and all(type(t) is torch.Tensor for t in (q, k, v, output, table, cu_q, cu_k)))
     if supported:
         supported = (q.ndim == 3 and 0 < q.shape[0] <= 8192
