@@ -72,20 +72,41 @@ def fused_attention(positions, query, key, value, table, output, layer_name):
     trace(layer_name,'fused')
 
 
+def _qkv_head_views(qkv):
+    """Return alias-only head views, or None to retain the original layout path.
+
+    A padded row stride and a nonzero storage offset are valid: only the
+    contiguous final dimension is split. Empty inputs retain the original
+    inferred-dimension behavior, and subclasses retain their own dispatch.
+    """
+    if (type(qkv) is not torch.Tensor or qkv.dtype != torch.bfloat16
+            or qkv.ndim != 2 or qkv.shape[0] == 0 or qkv.shape[1] != 2560
+            or qkv.stride(1) != 1 or qkv.stride(0) < 2560):
+        return None
+    return qkv.view(qkv.shape[0], 20, 128).split((16, 2, 2), dim=1)
+
+
 class RopeKVAttention(LlamaAttention):
     def forward(self, positions, hidden_states):
         qkv,_=self.qkv_proj(hidden_states)
-        q,k,v=qkv.split([self.q_size,self.kv_size,self.kv_size],dim=-1)
+        views = _qkv_head_views(qkv) if (self.q_size, self.kv_size) == (2048, 256) else None
+        if views is None:
+            q,k,v=qkv.split([self.q_size,self.kv_size,self.kv_size],dim=-1)
+        else:
+            q,k,v=views
         metadata,_,cache,_=get_attention_context(self.attn.layer_name)
         reason=fallback_reason(self.attn,self.rotary_emb,q,cache,metadata,
                                get_forward_context().cudagraph_runtime_mode)
         if os.environ.get('C500_ROPE_KV_FORCE_FALLBACK')=='1': reason='diagnostic_force'
         if reason is not None:
+            if views is not None:
+                q,k,v=qkv.split([self.q_size,self.kv_size,self.kv_size],dim=-1)
             trace(self.attn.layer_name,'separated',reason)
             q,k=self.rotary_emb(positions,q,k)
             attention_output=self.attn(q,k,v)
         else:
-            q=q.view(-1,16,128);k=k.view(-1,2,128);v=v.view(-1,2,128)
+            if views is None:
+                q=q.view(-1,16,128);k=k.view(-1,2,128);v=v.view(-1,2,128)
             output=torch.empty_like(q)
             table=self.rotary_emb.cos_sin_cache.to(positions.device)
             fused_attention(positions,q,k,v,table,output,self.attn.layer_name)
