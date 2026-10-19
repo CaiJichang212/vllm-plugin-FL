@@ -56,6 +56,7 @@ class Contract(unittest.TestCase):
         q=N(quant_method=Method(),bias=None,tp_size=1,hook=False,changed=False)
         rotary=N(hook=False)
         identity=lambda m:(id(m),getattr(m,'changed',False))
+        q.weight=None;rotary.cos_sin_cache=None
         self_attention=N(qkv_proj=q,rotary_emb=rotary,attn=None,_qkv_fusion_saved=(identity(q),identity(rotary)))
         state=N(grad=False,inference=True)
         fake_torch=N(is_grad_enabled=lambda:state.grad,is_inference_mode_enabled=lambda:state.inference)
@@ -63,8 +64,9 @@ class Contract(unittest.TestCase):
         ns=dict(__package__='contract',_dispatch_identity=identity,torch=fake_torch,
                 fallback_reason=lambda *a:None,get_forward_context=lambda:N(cudagraph_runtime_mode=None),os=N(environ={}))
         exec(compile(ast.Module(body=[node],type_ignores=[]),str(SOURCE),'exec'),ns)
-        metadata=N(num_prefills=0,num_prefill_tokens=0,num_decodes=4,num_decode_tokens=4,num_actual_tokens=4)
-        with patch.dict(sys.modules,{'contract.minicpm5_ffn_fusion':fusion,'torch.nn.modules':mods,'torch.nn.modules.module':hooks,'vllm.model_executor.layers.linear':linear}):
+        metadata=N(num_prefills=0,num_prefill_tokens=0,num_decodes=4,num_decode_tokens=4,num_actual_tokens=4,slot_mapping=None)
+        op=types.ModuleType('flag_gems.runtime.backend._metax.fused.qkv_rope_cache');op.supported=lambda *a:True
+        with patch.dict(sys.modules,{'flag_gems.runtime.backend._metax.fused.qkv_rope_cache':op,'contract.minicpm5_ffn_fusion':fusion,'torch.nn.modules':mods,'torch.nn.modules.module':hooks,'vllm.model_executor.layers.linear':linear}):
             invoke=lambda:ns['qkv_fallback_reason'](self_attention,N(ndim=1),N(shape=(4,2048)),metadata,None)
             self.assertIsNone(invoke())
             for obj,attr,value,reason in [(q,'hook',True,'hooks'),(q,'changed',True,'dispatch_changed'),(metadata,'num_prefills',1,'prefill_or_profile'),(metadata,'num_decode_tokens',5,'not_single_token_decode'),(state,'grad',True,'autograd'),(q,'bias',object(),'projection')]:

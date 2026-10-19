@@ -116,6 +116,9 @@ def qkv_fallback_reason(self, positions, hidden, metadata, cache):
     if reason is not None: return reason
     if positions.ndim != 1: return 'positions'
     if os.environ.get('C500_ROPE_KV_FORCE_FALLBACK') == '1': return 'diagnostic_force'
+    from flag_gems.runtime.backend._metax.fused.qkv_rope_cache import supported
+    if not supported(hidden, self.qkv_proj.weight, positions, self.rotary_emb.cos_sin_cache, cache, metadata.slot_mapping):
+        return 'kernel_support'
     return None
 
 
@@ -126,7 +129,7 @@ def fused_qkv_attention(self, positions, hidden_states, output, layer_name):
     from flag_gems.runtime.backend._metax.fused.qkv_rope_cache import try_qkv_rope_cache
     qkv = try_qkv_rope_cache(hidden_states, self.qkv_proj.weight, positions,
                              self.rotary_emb.cos_sin_cache, cache, metadata.slot_mapping)
-    if qkv is None: return False
+    if qkv is None: raise RuntimeError('QKV support changed after transfer wait; no fallback')
     q, k, v = qkv.split([2048, 256, 256], dim=-1)
     q = q.view(-1, 16, 128); k = k.view(-1, 2, 128); v = v.view(-1, 2, 128)
     layer.impl.forward(layer, q, k, v, cache, metadata, output=output,
