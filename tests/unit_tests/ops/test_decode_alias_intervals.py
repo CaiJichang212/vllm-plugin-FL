@@ -142,6 +142,20 @@ class HostContract(unittest.TestCase):
                 self.assertEqual(ns['_generic_disjoint'](begin,end,q,q.shape,q.stride(),k,k.shape,v,v.shape,t,t.shape,t.stride(),l,l.shape,l.stride()),expected)
 
 
+    def test_unaligned_storage_and_rows_never_submit(self):
+        ns=functions(TORCH)
+        ns['fa'].flash_attn_cuda=N(fwd_kvcache=lambda *a:self.fail('unaligned native submission'))
+        for index in (0,1,2,3):
+            ts=tensors();ts[index].ptr+=2
+            self.assertFalse(call(ns,ts,phase='decode',layer_name='model.layers.41.self_attn.attn'))
+        for stride in ((2561,2048,128,1),(2560,2048,129,1)):
+            ts=tensors();ts[0].strides=stride
+            self.assertFalse(call(ns,ts,phase='decode',layer_name='model.layers.41.self_attn.attn'))
+        # The old failing fixture used offset=37 BF16 elements (74 bytes).
+        ts=tensors();ts[0].ptr+=74
+        self.assertFalse(call(ns,ts))
+
+
 class DeviceContract(unittest.TestCase):
     def test_fa2_exact_output_inputs_and_sentinels(self):
         import torch
@@ -151,20 +165,33 @@ class DeviceContract(unittest.TestCase):
         torch.manual_seed(20261021)
         with torch.inference_mode():
             for m,row in ((1,2560),(2,2560),(3,2560),(4,2560),(4,3000)):
-                raw=torch.randn((37+m*row+31,),device='cuda',dtype=torch.bfloat16)
-                q=raw.as_strided((m,1,16,128),(row,2048,128,1),37)
-                kv=torch.randn((2,3,16,2,128),device='cuda',dtype=torch.bfloat16)
-                table=torch.tensor([[0,1]]*m,device='cuda',dtype=torch.int32)
-                lengths=torch.tensor([min(29,1+9*i) for i in range(m)],device='cuda',dtype=torch.int32)
+                raw=torch.randn((40+m*row+32,),device='cuda',dtype=torch.bfloat16)
+                q=raw.as_strided((m,1,16,128),(row,2048,128,1),40)
+                kv=torch.randn((2,16,16,2,128),device='cuda',dtype=torch.bfloat16)
+                table=torch.tensor([[0,1,2,3]]*m,device='cuda',dtype=torch.int32)
+                lengths=torch.tensor([min(61,1+20*i) for i in range(m)],device='cuda',dtype=torch.int32)
                 a=torch.full((m*2048+19,),-13.,device='cuda',dtype=torch.bfloat16)
                 b=a.clone();out_a=a[:m*2048].view(m,16,128);out_b=b[:m*2048].view(m,16,128)
                 before=[x.clone() for x in (raw,kv,table,lengths)]
                 args=[q,kv[0],kv[1],out_a,table,lengths]
-                self.assertTrue(call(ns,args))  # Original generic alias proof, same native ABI.
-                args[3]=out_b
-                self.assertTrue(call(ns,args,phase='decode',layer_name='model.layers.41.self_attn.attn'))
+                # Exercise the original failure geometry without ever submitting it.
+                unaligned=raw.as_strided((m,1,16,128),(row,2048,128,1),37)
+                self.assertFalse(call(ns,[unaligned,*args[1:]]))
+                expected=fa.flash_attn_with_kvcache(q,kv[0],kv[1],
+                    block_table=table,cache_seqlens=lengths,
+                    softmax_scale=.125,causal=True)
                 torch.cuda.synchronize()
+                # Synchronize each submission: any native failure is attributed
+                # to its actual generic/candidate case, never a later API call.
+                with self.subTest(m=m,row=row,proof='generic'):
+                    self.assertTrue(call(ns,args))
+                    torch.cuda.synchronize()
+                args[3]=out_b
+                with self.subTest(m=m,row=row,proof='specialized'):
+                    self.assertTrue(call(ns,args,phase='decode',layer_name='model.layers.41.self_attn.attn'))
+                    torch.cuda.synchronize()
                 self.assertTrue(torch.equal(a,b));self.assertTrue(torch.all(b[-19:]==-13.))
+                self.assertTrue(torch.equal(out_b,expected.reshape(m,16,128)))
                 for x,saved in zip((raw,kv,table,lengths),before):self.assertTrue(torch.equal(x,saved))
 
 

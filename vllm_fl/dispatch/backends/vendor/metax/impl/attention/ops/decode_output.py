@@ -109,6 +109,14 @@ def try_decode_into(public, q, k_cache, v_cache, output, block_table,
                      and (q_stride := q.stride())[-1] == (table_stride := block_table.stride())[-1] == (lens_stride := cache_seqlens.stride())[-1] == 1
                      and all(s > 0 for stride in (q_stride, table_stride, lens_stride) for s in stride))
     if supported:
+        # The native BF16 vector loads require 16-byte aligned row starts.
+        # Shape/positive-stride validation alone does not establish alignment:
+        # a nonzero storage offset can leave every logical row misaligned.
+        # Refuse before submission; caller retains the public fallback.
+        supported = (all(t.data_ptr() % 16 == 0 for t in (q, k_cache, v_cache, output))
+                     and all(n == 1 or s % 8 == 0
+                             for n, s in zip(q_shape[:-1], q_stride[:-1])))
+    if supported:
         begin, end = _interval(output, output_shape)
         # Context only chooses a host proof; it never weakens the guards above.
         parts = layer_name.split('.') if isinstance(layer_name, str) else ()
