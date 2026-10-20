@@ -122,6 +122,37 @@ def qkv_fallback_reason(self, positions, hidden, metadata, cache):
     return None
 
 
+def original_kv_pair(cache, reason):
+    # Keep the public dispatcher for unsupported objects/layouts.
+    return cache.unbind(0)
+
+
+def decode_kv_pair(cache, x, phase, layer_name):
+    """Call-local BF16 KV views; no cached tensor, pointer, or metadata."""
+    parts = layer_name.split('.') if isinstance(layer_name, str) else []
+    layer = int(parts[2]) if (len(parts) > 2 and parts[:2] == ['model', 'layers']
+                              and parts[2].isdigit()) else -1
+    if (phase == 'decode' and 0 <= layer < 42
+            and type(cache) is torch.Tensor and type(x) is torch.Tensor
+            and tuple(x.shape) == (4, 2560)
+            and cache.ndim == 5 and cache.shape[0] == 2
+            and tuple(cache.shape[2:]) == (16, 2, 128) and cache.shape[1] > 0
+            and cache.dtype == x.dtype == torch.bfloat16
+            and cache.device.type == 'cuda' and cache.device == x.device
+            and not cache.requires_grad and not x.requires_grad
+            and all(s > 0 for s in cache.stride())):
+        size = tuple(cache.shape[1:])
+        strides = cache.stride()
+        offset = cache.storage_offset()
+        # Preserve arbitrary positive strides and the caller's storage offset.
+        # This line is observed only after the supported-domain guards.
+        key = cache.as_strided(size, strides[1:], offset)
+        value = cache.as_strided(size, strides[1:], offset + strides[0])
+        return key, value
+    reason = 'outside_ordinary_m4_decode'
+    return original_kv_pair(cache, reason)
+
+
 @maybe_transfer_kv_layer
 def fused_qkv_attention(self, positions, hidden_states, output, layer_name):
     # Wait for transfer BEFORE projection/cache writes, save after attention.
@@ -133,7 +164,8 @@ def fused_qkv_attention(self, positions, hidden_states, output, layer_name):
     q, k, v = qkv.split([2048, 256, 256], dim=-1)
     q = q.view(-1, 16, 128); k = k.view(-1, 2, 128); v = v.view(-1, 2, 128)
     layer.impl.forward(layer, q, k, v, cache, metadata, output=output,
-                       cache_already_written=True, _cache_views=cache.unbind(0))
+                       cache_already_written=True, _cache_views=decode_kv_pair(
+                           cache, qkv, 'decode' if metadata.num_prefills == 0 else 'mixed', layer_name))
     if _qkv_observe: _qkv_counts[layer_name] = _qkv_counts.get(layer_name, 0) + 1
     trace(layer_name, 'qkv_rope_cache')
     return True
