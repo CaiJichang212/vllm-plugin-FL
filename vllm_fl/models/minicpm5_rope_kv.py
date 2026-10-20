@@ -128,7 +128,8 @@ def fused_qkv_attention(self, positions, hidden_states, output, layer_name):
     metadata, layer, cache, _ = get_attention_context(layer_name)
     from flag_gems.runtime.backend._metax.fused.qkv_rope_cache import try_qkv_rope_cache
     qkv = try_qkv_rope_cache(hidden_states, self.qkv_proj.weight, positions,
-                             self.rotary_emb.cos_sin_cache, cache, metadata.slot_mapping)
+                             self.rotary_emb.cos_sin_cache, cache, metadata.slot_mapping,
+                             phase='decode', layer=self._qkv_launch_layer)
     if qkv is None: raise RuntimeError('QKV support changed after transfer wait; no fallback')
     q, k, v = qkv.split([2048, 256, 256], dim=-1)
     q = q.view(-1, 16, 128); k = k.view(-1, 2, 128); v = v.view(-1, 2, 128)
@@ -142,6 +143,8 @@ def fused_qkv_attention(self, positions, hidden_states, output, layer_name):
 class RopeKVAttention(LlamaAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        from vllm.model_executor.models.utils import extract_layer_index
+        self._qkv_launch_layer = extract_layer_index(self.attn.layer_name)
         from vllm.model_executor.layers.linear import QKVParallelLinear
         from vllm import envs
         if type(self.qkv_proj) is QKVParallelLinear and not envs.VLLM_BATCH_INVARIANT:
