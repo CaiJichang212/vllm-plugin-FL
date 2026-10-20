@@ -46,8 +46,44 @@ def _disjoint(begin, end, t, shape, stride=None):
     return end <= a or begin >= b
 
 
+def _generic_disjoint(begin, end, q, q_shape, q_stride, k_cache, k_shape,
+                      v_cache, v_shape, block_table, table_shape, table_stride,
+                      cache_seqlens, lens_shape, lens_stride):
+    return (_disjoint(begin, end, q, q_shape, q_stride)
+            and _disjoint(begin, end, k_cache, k_shape)
+            and _disjoint(begin, end, v_cache, v_shape)
+            and _disjoint(begin, end, block_table, table_shape, table_stride)
+            and _disjoint(begin, end, cache_seqlens, lens_shape, lens_stride))
+
+
+def _m4_disjoint(begin, end, q, q_stride, k_cache, v_cache, blocks,
+                 block_table, table_shape, table_stride, cache_seqlens, lens_stride):
+    """Closed-form bounding intervals AFTER the ordinary layout/type guards.
+
+    BF16 q=[4,1,16,128], contiguous BF16 KV=[blocks,16,2,128],
+    int32 table=[4,width], int32 lengths=[4]; all strides positive.
+    data_ptr includes storage_offset. No pointer, tensor or proof is cached.
+    Bounding intervals remain conservative for padding, as in the reference.
+    """
+    q_begin = q.data_ptr()
+    if not (end <= q_begin or begin >= q_begin + 2 * (3*q_stride[0] + 15*q_stride[2] + 128)):
+        return False
+    k_begin = k_cache.data_ptr()
+    if not (end <= k_begin or begin >= k_begin + blocks*8192):
+        return False
+    v_begin = v_cache.data_ptr()
+    if not (end <= v_begin or begin >= v_begin + blocks*8192):
+        return False
+    table_begin = block_table.data_ptr()
+    if not (end <= table_begin or begin >= table_begin + 4*(3*table_stride[0] + table_shape[1])):
+        return False
+    lens_begin = cache_seqlens.data_ptr()
+    return end <= lens_begin or begin >= lens_begin + 4*(3*lens_stride[0] + 1)
+
+
 def try_decode_into(public, q, k_cache, v_cache, output, block_table,
-                    cache_seqlens, scale, window, alibi, softcap, sinks):
+                    cache_seqlens, scale, window, alibi, softcap, sinks,
+                    *, phase=None, layer_name=None):
     supported = (flash_attn.__version__ == '2.6.3' and public is _PUBLIC
                  and fa.flash_attn_with_kvcache is _PUBLIC
                  and fa.maybe_contiguous is _CONTIGUOUS
@@ -74,11 +110,18 @@ def try_decode_into(public, q, k_cache, v_cache, output, block_table,
                      and all(s > 0 for stride in (q_stride, table_stride, lens_stride) for s in stride))
     if supported:
         begin, end = _interval(output, output_shape)
-        supported = (_disjoint(begin, end, q, q_shape, q_stride)
-                     and _disjoint(begin, end, k_cache, k_shape)
-                     and _disjoint(begin, end, v_cache, v_shape)
-                     and _disjoint(begin, end, block_table, table_shape, table_stride)
-                     and _disjoint(begin, end, cache_seqlens, lens_shape, lens_stride))
+        # Context only chooses a host proof; it never weakens the guards above.
+        parts = layer_name.split('.') if isinstance(layer_name, str) else ()
+        layer_index = (int(parts[2]) if len(parts) > 2 and parts[:2] == ['model', 'layers']
+                       and parts[2].isdigit() else -1)
+        if q_shape[0] == 4 and table_shape[1] > 0 and phase == 'decode' and 0 <= layer_index < 42:
+            supported = _m4_disjoint(begin, end, q, q_stride, k_cache, v_cache, k_shape[0],
+                                     block_table, table_shape, table_stride, cache_seqlens, lens_stride)
+        else:
+            reason = 'outside_m4_decode_layer_domain'
+            supported = _generic_disjoint(begin, end, q, q_shape, q_stride, k_cache, k_shape,
+                                          v_cache, v_shape, block_table, table_shape, table_stride,
+                                          cache_seqlens, lens_shape, lens_stride)
     if not supported:
         _count('fallback')
         return False

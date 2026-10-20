@@ -878,6 +878,8 @@ class FlashAttentionImpl(AttentionImpl):
                         attn_metadata.decode_seq_lens, self.scale,
                         self.sliding_window, self.alibi_slopes,
                         self.logits_soft_cap, self.sinks,
+                        phase='decode' if attn_metadata.num_prefills == 0 else 'mixed',
+                        layer_name=getattr(layer, 'layer_name', None),
                     ):
                         return output
                     output_unreshape = flash_attn_with_kvcache(
