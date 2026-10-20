@@ -867,13 +867,27 @@ class FlashAttentionImpl(AttentionImpl):
                         )
                 if attn_metadata.num_decodes > 0:
                     # Use flash_attn_with_kvcache for normal decoding.
-                    decode_query = query[:num_decode_tokens]
+                    # Only ordinary tensors in a full, pure decoder call can
+                    # reuse the input handles. Keep subclass dispatch and all
+                    # mixed/padded ranges on the original slicing path. Nothing
+                    # is retained across calls, including shape decisions.
+                    full_decode_span = (
+                        attn_type == AttentionType.DECODER
+                        and num_decode_tokens > 0
+                        and attn_metadata.num_prefills == 0
+                        and type(query) is torch.Tensor
+                        and type(output) is torch.Tensor
+                        and num_decode_tokens == num_actual_tokens
+                        and num_decode_tokens == query.shape[0]
+                        and num_decode_tokens == output.shape[0]
+                    )
+                    decode_query = query if full_decode_span else query[:num_decode_tokens]
                     decode_query = reshape_query_for_spec_decode(
                         decode_query, attn_metadata.num_decodes
                     )
                     if try_decode_into(
                         flash_attn_with_kvcache, decode_query, key_cache,
-                        value_cache, output[:num_decode_tokens],
+                        value_cache, output if full_decode_span else output[:num_decode_tokens],
                         attn_metadata.decode_block_table,
                         attn_metadata.decode_seq_lens, self.scale,
                         self.sliding_window, self.alibi_slopes,
