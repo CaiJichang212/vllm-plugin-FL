@@ -122,6 +122,28 @@ def qkv_fallback_reason(self, positions, hidden, metadata, cache):
     return None
 
 
+def _original_qkv_views(qkv):
+    q, k, v = qkv.split([2048, 256, 256], dim=-1)
+    return q.view(-1, 16, 128), k.view(-1, 2, 128), v.view(-1, 2, 128)
+
+
+def _direct_qkv_views(qkv):
+    """Call-local views only; retain every Q/K/V value and storage offset.
+
+    Restrict this first candidate to the observed ordinary four-token decode.
+    Unlike unused-K/V elision, all three complete views reach the consumer.
+    """
+    if (type(qkv) is not torch.Tensor or qkv.ndim != 2
+            or tuple(qkv.shape) != (4, 2560) or qkv.stride(1) != 1
+            or qkv.stride(0) < 2560):
+        return None
+    stride = (qkv.stride(0), 128, 1)
+    offset = qkv.storage_offset()
+    return (qkv.as_strided((4, 16, 128), stride, offset),
+            qkv.as_strided((4, 2, 128), stride, offset + 2048),
+            qkv.as_strided((4, 2, 128), stride, offset + 2304))
+
+
 @maybe_transfer_kv_layer
 def fused_qkv_attention(self, positions, hidden_states, output, layer_name):
     # Wait for transfer BEFORE projection/cache writes, save after attention.
@@ -130,8 +152,15 @@ def fused_qkv_attention(self, positions, hidden_states, output, layer_name):
     qkv = try_qkv_rope_cache(hidden_states, self.qkv_proj.weight, positions,
                              self.rotary_emb.cos_sin_cache, cache, metadata.slot_mapping)
     if qkv is None: raise RuntimeError('QKV support changed after transfer wait; no fallback')
-    q, k, v = qkv.split([2048, 256, 256], dim=-1)
-    q = q.view(-1, 16, 128); k = k.view(-1, 2, 128); v = v.view(-1, 2, 128)
+    views = _direct_qkv_views(qkv)
+    phase = 'decode'  # guarded by qkv_fallback_reason before transfer wait
+    layer_part = layer_name.rsplit('layers.', 1)[-1].split('.', 1)[0]
+    layer_index = int(layer_part) if layer_part.isdecimal() else -1
+    reason = 'shape_layout_or_tensor_subclass'
+    if views is None or layer_index < 0:
+        q, k, v = _original_qkv_views(qkv)
+    else:
+        q, k, v = views
     layer.impl.forward(layer, q, k, v, cache, metadata, output=output,
                        cache_already_written=True, _cache_views=cache.unbind(0))
     if _qkv_observe: _qkv_counts[layer_name] = _qkv_counts.get(layer_name, 0) + 1
