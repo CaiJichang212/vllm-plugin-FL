@@ -16,6 +16,8 @@ from vllm_fl.dispatch.backends.vendor.metax.impl.attention.flash_attn import Fla
 from vllm_fl.dispatch.backends.vendor.metax.impl.attention.ops.rope_kv import fused_rope_cache
 
 NUM_WARPS = 8
+# Retain the verified consumer identity, not any per-call tensor or metadata.
+_QKV_NATIVE_FORWARD = FlashAttentionImpl.forward
 
 
 def model_supported(config):
@@ -130,8 +132,20 @@ def fused_qkv_attention(self, positions, hidden_states, output, layer_name):
     qkv = try_qkv_rope_cache(hidden_states, self.qkv_proj.weight, positions,
                              self.rotary_emb.cos_sin_cache, cache, metadata.slot_mapping)
     if qkv is None: raise RuntimeError('QKV support changed after transfer wait; no fallback')
-    q, k, v = qkv.split([2048, 256, 256], dim=-1)
-    q = q.view(-1, 16, 128); k = k.view(-1, 2, 128); v = v.view(-1, 2, 128)
+    # Native pure decode reads K/V from the cache already written above.
+    # Custom consumers and changed modes retain the original complete views.
+    impl = layer.impl
+    if (type(qkv) is torch.Tensor and type(impl) is FlashAttentionImpl
+            and getattr(impl.forward, '__func__', None) is _QKV_NATIVE_FORWARD
+            and impl.attn_type == AttentionType.DECODER
+            and impl.dcp_world_size == 1 and impl.kv_cache_dtype == 'auto'
+            and not metadata.use_cascade and not metadata.num_prefills
+            and not metadata.num_prefill_tokens):
+        q = qkv.narrow(-1, 0, 2048).view(-1, 16, 128)
+        k = v = None
+    else:
+        q, k, v = qkv.split([2048, 256, 256], dim=-1)
+        q = q.view(-1, 16, 128); k = k.view(-1, 2, 128); v = v.view(-1, 2, 128)
     layer.impl.forward(layer, q, k, v, cache, metadata, output=output,
                        cache_already_written=True, _cache_views=cache.unbind(0))
     if _qkv_observe: _qkv_counts[layer_name] = _qkv_counts.get(layer_name, 0) + 1
