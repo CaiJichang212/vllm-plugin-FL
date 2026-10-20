@@ -5,12 +5,12 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
 
-SOURCE = Path(__file__).resolve().parents[3] / 'vllm_fl/dispatch/backends/vendor/metax/impl/attention/ops/decode_query_view.py'
+SOURCE = Path(__file__).resolve().parents[3] / 'vllm_fl/dispatch/backends/vendor/metax/impl/attention/flash_attn.py'
 
 
 def functions(torch):
     tree = ast.parse(SOURCE.read_text())
-    tree.body = [n for n in tree.body if isinstance(n, ast.FunctionDef)]
+    tree.body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("decode_query_view", "original_query_view")]
     ns = {'torch': torch}
     exec(compile(tree, str(SOURCE), 'exec'), ns)
     return ns
@@ -65,8 +65,37 @@ class HostContract(unittest.TestCase):
             def __getitem__(self,key):seen.append(key);return 'prefix'
         self.assertEqual(ns['original_query_view'](Prefix(),3,1,lambda q,n:(q,n),'test'),('prefix',1))
         self.assertEqual(seen,[slice(None,3)])
+    def test_common_outer_and_branch_have_same_traceable_file(self):
+        # The A/B observer requires both targets in one file. A helper-only
+        # outer target cannot possibly be called by the unmodified A source.
+        import sys
+        tree=ast.parse(SOURCE.read_text())
+        cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='FlashAttentionImpl')
+        method=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='forward')
+        # Compile the real method unchanged, deferring dependency annotations.
+        cls.body=[method];cls.bases=[];cls.decorator_list=[]
+        unit=ast.Module(body=[ast.ImportFrom(module='__future__',names=[ast.alias(name='annotations')],level=0),cls],type_ignores=[])
+        ast.fix_missing_locations(unit);ns={}
+        exec(compile(unit,str(SOURCE),'exec'),ns)
+        forward=ns['FlashAttentionImpl'].forward
+        self.assertEqual(forward.__qualname__,'FlashAttentionImpl.forward')
+        calls=[]
+        def profile(frame,event,arg):
+            if event=='call' and frame.f_code.co_qualname=='FlashAttentionImpl.forward':
+                calls.append(frame.f_code.co_filename)
+        previous=sys.getprofile()
+        try:
+            sys.setprofile(profile)
+            # Real method early profiling path, no tensor/library import.
+            out=NS(fill_=lambda value: ('profile',value))
+            self.assertEqual(forward(None,None,None,None,None,None,None,output=out),('profile',0))
+        finally:sys.setprofile(previous)
+        self.assertEqual(calls,[str(SOURCE)])
+        helper=functions(NS(Tensor=Tensor,bfloat16='bf16'))['decode_query_view']
+        self.assertEqual(helper.__code__.co_filename,forward.__code__.co_filename)
+
     def test_forward_calls_helper_with_actual_metadata(self):
-        p=SOURCE.parents[1]/'flash_attn.py';tree=ast.parse(p.read_text())
+        p=SOURCE;tree=ast.parse(p.read_text())
         calls=[n for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name) and n.func.id=='decode_query_view']
         self.assertEqual(len(calls),1)
         c=calls[0]
