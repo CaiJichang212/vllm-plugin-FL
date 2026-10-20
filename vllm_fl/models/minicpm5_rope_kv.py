@@ -139,11 +139,43 @@ def fused_qkv_attention(self, positions, hidden_states, output, layer_name):
     return True
 
 
+def original_decode_o(proj, x):
+    return proj(x)[0]
+
+
+def project_decode_o(self, x, phase, layer):
+    """Use split-K only on the saved unquantized, hook-free O dispatch."""
+    from .minicpm5_ffn_fusion import _hooked
+    from torch.nn.modules import module as hooks
+    from vllm.model_executor.layers.linear import RowParallelLinear, UnquantizedLinearMethod
+    proj = self.o_proj
+    saved = getattr(self, '_decode_o_saved', None)
+    if (saved is not None and _dispatch_identity(proj) == saved
+            and type(proj) is RowParallelLinear
+            and type(proj.quant_method) is UnquantizedLinearMethod
+            and proj.bias is None and proj.tp_size == 1
+            and not _hooked(proj)
+            and not any(getattr(hooks, n, {}) for n in
+                        ('_global_forward_hooks', '_global_forward_pre_hooks',
+                         '_global_backward_hooks', '_global_backward_pre_hooks'))
+            and not any(getattr(proj, n, None) is not None for n in
+                        ('lora_a', 'lora_b', 'adapter', 'adapter_layer', 'lora_manager'))):
+        from flag_gems.runtime.backend._metax.fused.decode_o_split_k import try_decode_o
+        output = try_decode_o(x, proj.weight, phase=phase, layer=layer)
+        if output is not None:
+            return output
+    return original_decode_o(proj, x)
+
+
 class RopeKVAttention(LlamaAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        from vllm.model_executor.layers.linear import QKVParallelLinear
+        from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear, UnquantizedLinearMethod
         from vllm import envs
+        if (type(self.o_proj) is RowParallelLinear
+                and type(self.o_proj.quant_method) is UnquantizedLinearMethod
+                and not envs.VLLM_BATCH_INVARIANT):
+            self._decode_o_saved = _dispatch_identity(self.o_proj)
         if type(self.qkv_proj) is QKVParallelLinear and not envs.VLLM_BATCH_INVARIANT:
             self._qkv_fusion_saved = tuple(map(_dispatch_identity, (self.qkv_proj, self.rotary_emb)))
 
@@ -153,7 +185,10 @@ class RopeKVAttention(LlamaAttention):
             fused_output = torch.empty((hidden_states.shape[0], 16, 128),
                                        device=hidden_states.device, dtype=hidden_states.dtype)
             if fused_qkv_attention(self, positions, hidden_states, fused_output, self.attn.layer_name):
-                output, _ = self.o_proj(fused_output.view(-1, self.q_size))
+                x = fused_output.view(-1, self.q_size)
+                phase = 'decode'
+                layer = int(self.attn.layer_name.split('layers.')[1].split('.')[0])
+                output = project_decode_o(self, x, phase, layer)
                 return output
         qkv,_=self.qkv_proj(hidden_states)
         q,k,v=qkv.split([self.q_size,self.kv_size,self.kv_size],dim=-1)
