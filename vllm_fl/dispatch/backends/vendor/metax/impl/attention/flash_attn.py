@@ -53,6 +53,8 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
 )
+from .ops.decode_query_view import decode_query_view
+
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     get_dcp_local_seq_lens,
@@ -867,9 +869,11 @@ class FlashAttentionImpl(AttentionImpl):
                         )
                 if attn_metadata.num_decodes > 0:
                     # Use flash_attn_with_kvcache for normal decoding.
-                    decode_query = query[:num_decode_tokens]
-                    decode_query = reshape_query_for_spec_decode(
-                        decode_query, attn_metadata.num_decodes
+                    decode_query = decode_query_view(
+                        query, num_decode_tokens, attn_metadata.num_decodes,
+                        reshape_query_for_spec_decode,
+                        'decode' if attn_metadata.num_prefills == 0 else 'mixed',
+                        getattr(layer, 'layer_name', None),
                     )
                     if try_decode_into(
                         flash_attn_with_kvcache, decode_query, key_cache,
