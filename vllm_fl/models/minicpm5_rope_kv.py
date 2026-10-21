@@ -122,13 +122,35 @@ def qkv_fallback_reason(self, positions, hidden, metadata, cache):
     return None
 
 
+def original_qkv_projection(x, weight, positions, table, cache, slots, phase, layer, reason):
+    from flag_gems.runtime.backend._metax.fused.qkv_rope_cache import try_qkv_rope_cache
+    return try_qkv_rope_cache(x, weight, positions, table, cache, slots)
+
+
+def project_qkv_decode_col64(x, weight, positions, table, cache, slots, phase, layer_name):
+    """Only ordinary M4 decode uses the wider column tile; no post-launch retry."""
+    from flag_gems.runtime.backend._metax.fused.qkv_rope_cache import try_qkv_rope_cache_m4_col64
+    parts = layer_name.split('.') if isinstance(layer_name, str) else []
+    layer = int(parts[-3]) if (len(parts) >= 4 and parts[-4] == 'layers'
+                              and parts[-3].isdigit() and parts[-2:] == ['self_attn', 'attn']) else -1
+    if (phase != 'decode' or not 0 <= layer < 42 or type(x) is not torch.Tensor
+            or tuple(x.shape) != (4, 2048)):
+        return original_qkv_projection(x, weight, positions, table, cache, slots,
+                                       phase, layer, 'outside_m4_decode_domain')
+    qkv = try_qkv_rope_cache_m4_col64(x, weight, positions, table, cache, slots)
+    if qkv is None:
+        return original_qkv_projection(x, weight, positions, table, cache, slots,
+                                       phase, layer, 'kernel_support')
+    return qkv
+
+
 @maybe_transfer_kv_layer
 def fused_qkv_attention(self, positions, hidden_states, output, layer_name):
     # Wait for transfer BEFORE projection/cache writes, save after attention.
     metadata, layer, cache, _ = get_attention_context(layer_name)
-    from flag_gems.runtime.backend._metax.fused.qkv_rope_cache import try_qkv_rope_cache
-    qkv = try_qkv_rope_cache(hidden_states, self.qkv_proj.weight, positions,
-                             self.rotary_emb.cos_sin_cache, cache, metadata.slot_mapping)
+    qkv = project_qkv_decode_col64(hidden_states, self.qkv_proj.weight, positions,
+                                  self.rotary_emb.cos_sin_cache, cache, metadata.slot_mapping,
+                                  'decode' if metadata.num_prefills == 0 else 'mixed', layer_name)
     if qkv is None: raise RuntimeError('QKV support changed after transfer wait; no fallback')
     q, k, v = qkv.split([2048, 256, 256], dim=-1)
     q = q.view(-1, 16, 128); k = k.view(-1, 2, 128); v = v.view(-1, 2, 128)
