@@ -68,14 +68,38 @@ def fallback_reason(mlp, x):
     return None
 
 
+def original_gate_up(x, weight, phase, layer, reason):
+    from flag_gems.runtime.backend._metax.fused.gate_up_silu import try_gate_up_silu
+    return try_gate_up_silu(x, weight)
+
+
+def project_gate_up_row32(x, weight, prefix):
+    """M4 single-token decode only; preserve original support and full FFN fallback."""
+    from flag_gems.runtime.backend._metax.fused.gate_up_silu import try_gate_up_silu
+    from vllm.model_executor.layers.attention.attention import get_attention_context
+    parts = prefix.split('.') if isinstance(prefix, str) else []
+    layer = int(parts[-2]) if (len(parts) >= 3 and parts[-3] == 'layers'
+                               and parts[-2].isdigit() and parts[-1] == 'mlp') else -1
+    phase = 'outside_domain'
+    if type(x) is torch.Tensor and tuple(x.shape) == (4, 2048) and 0 <= layer < 42:
+        metadata, _, _, _ = get_attention_context(prefix[:-3] + 'self_attn.attn')
+        if (metadata is not None and metadata.num_prefills == 0
+                and metadata.num_prefill_tokens == 0 and metadata.num_decodes == 4
+                and metadata.num_decode_tokens == 4 and metadata.num_actual_tokens == 4):
+            phase = 'decode'
+            out = try_gate_up_silu(x, weight, row32=True)
+            if out is not None:
+                return out
+    return original_gate_up(x, weight, phase, layer, 'outside_domain_or_kernel_support')
+
+
 def _forward(self, x):
     saved = self._c500_ffn_saved
     reason = fallback_reason(self, x)
     if reason is not None:
         if _observe: _counts['fallback:'+reason] += 1
         return saved['forward'](x)
-    from flag_gems.runtime.backend._metax.fused.gate_up_silu import try_gate_up_silu
-    out = try_gate_up_silu(x, self.gate_up_proj.weight)
+    out = project_gate_up_row32(x, self.gate_up_proj.weight, saved['prefix'])
     if out is None:
         if _observe: _counts['fallback:kernel_support'] += 1
         return saved['forward'](x)
