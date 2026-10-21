@@ -96,6 +96,19 @@ class HostContract(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'submitted'):invoke()
             self.assertEqual(events[before:],['value_direct'])
 
+    def test_branch_merge_types_and_bf16_promotion_exact(self):
+        import struct
+        kernel=next(n for n in ast.parse(KERNEL.read_text()).body
+                    if isinstance(n,ast.FunctionDef) and n.name=='qkv_value_direct_kernel')
+        branch=next(n for n in kernel.body if isinstance(n,ast.If))
+        self.assertEqual([ast.unparse(n) for n in branch.orelse],
+                         ['rlo = lo.to(tl.float32)','rhi = hi.to(tl.float32)'])
+        # All finite BF16 bit patterns survive FP32 promotion exactly.
+        for bits in range(65536):
+            if bits & 0x7f80 == 0x7f80: continue
+            value=struct.unpack('<f',struct.pack('<I',bits<<16))[0]
+            self.assertEqual(struct.unpack('<I',struct.pack('<f',value))[0]>>16,bits)
+
     def test_real_outer_and_actual_branch_have_all_layer_combinations(self):
         op=ModuleType(MODULE);op.try_qkv_rope_cache_m4_value_direct=lambda *a:'qkv'
         op.try_qkv_rope_cache=lambda *a:None
@@ -152,7 +165,7 @@ class HostContract(unittest.TestCase):
             self.assertEqual(operations(kernel,op),operations(optimized,op))
         branch=next(n for n in optimized.body if isinstance(n,ast.If))
         self.assertEqual(ast.unparse(branch.test),'tl.program_id(0) < 72')
-        self.assertEqual([ast.unparse(n) for n in branch.orelse],['rlo = lo','rhi = hi'])
+        self.assertEqual([ast.unparse(n) for n in branch.orelse],['rlo = lo.to(tl.float32)','rhi = hi.to(tl.float32)'])
         self.assertFalse(operations(ast.Module(body=branch.orelse,type_ignores=[]),'load'))
         # Exactly Q/K CTAs rotate; all V columns retain unrotated BF16 values.
         for cta in range(80):
