@@ -35,9 +35,11 @@ def bind_down_kn(mlp):
 def project_down_kn(mlp,x):
     down=mlp.down_proj
     prefix=mlp._c500_ffn_saved['prefix']
-    layer=int(prefix.split('.')[-2]);phase='outside_domain'
+    parts=prefix.split('.') if isinstance(prefix,str) else []
+    layer=int(parts[-2]) if len(parts)>=3 and parts[-3]=='layers' and parts[-2].isdigit() and parts[-1]=='mlp' else -1
+    phase='outside_domain'
     record=getattr(down,'_c500_kn_record',None)
-    if (record is not None and type(x) is torch.Tensor and tuple(x.shape)==(4,6144)
+    if (0<=layer<42 and record is not None and type(x) is torch.Tensor and tuple(x.shape)==(4,6144)
             and fallback_reason(mlp,x) is None
             and down.quant_method.process_weights_after_loading==down._c500_kn_post_load
             and down._c500_kn_weight is record[0]):
