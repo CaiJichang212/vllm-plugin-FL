@@ -3,7 +3,6 @@
 from types import MethodType
 import torch
 from vllm.model_executor.layers.attention.attention import get_attention_context
-from .minicpm5_ffn_fusion import fallback_reason
 
 
 def invalidate(down):
@@ -64,6 +63,7 @@ def bind_down_kn(mlp):
 
 
 def project_down_kn(mlp,x):
+    """Called only after the existing MLP fallback_reason check succeeded."""
     down=mlp.down_proj
     prefix=mlp._c500_ffn_saved['prefix']
     parts=prefix.split('.') if isinstance(prefix,str) else []
@@ -71,7 +71,6 @@ def project_down_kn(mlp,x):
     phase='outside_domain'
     record=getattr(down,'_c500_kn_record',None)
     if (0<=layer<42 and record is not None and type(x) is torch.Tensor and tuple(x.shape)==(4,6144)
-            and fallback_reason(mlp,x) is None
             and down.quant_method.process_weights_after_loading==down._c500_kn_post_load
             and down._c500_kn_weight is record[0]
             and down.weight.weight_loader is down._c500_kn_loader):
