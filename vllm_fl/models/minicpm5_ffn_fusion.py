@@ -78,10 +78,12 @@ def project_down_kn(mlp,x):
     phase='outside_domain'
     record=getattr(down,'_c500_kn_record',None)
     apply=down.quant_method.apply
+    weight_ref=getattr(down,'_c500_kn_loader_weight',None)
     if (0<=layer<42 and isinstance(record,list) and len(record)==4 and record[3] is True and type(x) is torch.Tensor and tuple(x.shape)==(4,6144)
             and down.quant_method.process_weights_after_loading==down._c500_kn_post_load
             and down._c500_kn_weight is record[0]
-            and down.weight.weight_loader is down._c500_kn_loader
+            and weight_ref is not None and weight_ref() is down.weight
+            and getattr(down.weight,'weight_loader',None) is down._c500_kn_loader
             and getattr(apply,'__func__',apply) is down._c500_kn_apply):
         metadata,_,_,_=get_attention_context(prefix[:-3]+'self_attn.attn')
         if (metadata is not None and metadata.num_prefills==0 and metadata.num_prefill_tokens==0

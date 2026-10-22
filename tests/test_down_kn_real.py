@@ -108,6 +108,15 @@ class ActualDownLayout(unittest.TestCase):
           try:
             with patch.object(op,'try_down_kn',side_effect=AssertionError('candidate reached replaced module')):mlp(gate_input)
           finally:mlp.down_proj=down
+          # A replacement may be an ordinary Parameter without weight_loader.
+          # The original down path remains valid and must be used without error.
+          original_weight=down.weight
+          down.weight=t.nn.Parameter(t.zeros_like(original_weight),requires_grad=False)
+          try:
+            with patch.object(op,'try_down_kn',side_effect=AssertionError('candidate reached replacement weight')):
+              fallback=plugin.project_down_kn(mlp,x)
+            self.assertTrue(bool((fallback==0).all()))
+          finally:down.weight=original_weight
           # A normal in-place update bumps the original version; no timed repack.
           # The real vLLM loader may update .data without a version bump.
           # Both the module and every retained descriptor must be invalidated.

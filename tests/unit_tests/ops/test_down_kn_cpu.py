@@ -65,6 +65,7 @@ class PhaseContract(unittest.TestCase):
       weight=NS(weight_loader='loader');_c500_kn_loader='loader';_c500_kn_record=[object(),None,None,True]
       def __init__(self):
         self._c500_kn_weight=self._c500_kn_record[0]
+        self._c500_kn_loader_weight=lambda:self.weight
         self._c500_kn_apply=object()
         self.quant_method=NS(process_weights_after_loading='post',apply=self._c500_kn_apply)
         self._c500_kn_post_load='post'
