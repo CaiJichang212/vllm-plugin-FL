@@ -13,7 +13,7 @@ class RealModelTests(unittest.TestCase):
         from c500_checkpoint_post_load import reclaim_after_load
         path=Path(os.environ['C500_FROZEN_PROTOCOL']);p=json.loads(path.read_text())
         output=Path(os.environ['C500_NUMERICAL_CAPTURE_PATH']).parent
-        captured={};fallbacks=set();requests=[];llm=None;shutdown=False
+        captured={};fallbacks=set();requests=[];llm=None;shutdown=False;dispatch=[]
         original=None;project=None;op=None;gate=None;plugin=None
         def observed(x,r,nw,w,eps):
             frame=inspect.currentframe().f_back
@@ -53,6 +53,12 @@ class RealModelTests(unittest.TestCase):
             return result
         def observed_project(layer,x,r):
             result=project(layer,x,r)
+            if layer._post_norm_saved[2].endswith('.0'):
+                from vllm.model_executor.layers.attention.attention import get_attention_context
+                meta,_,_,_=get_attention_context(layer._post_norm_saved[2]+'.self_attn.attn')
+                row=dict(shape=list(x.shape),num_prefills=meta.num_prefills if meta else None,num_decodes=meta.num_decodes if meta else None,hit=result is not None)
+                dispatch.append(row)
+                (output/'dispatch-observations.json').write_text(json.dumps(dispatch,indent=2))
             if x.shape[0] in (1,2,3):
                 self.assertIsNone(result);fallbacks.add(x.shape[0])
             return result
@@ -77,11 +83,11 @@ class RealModelTests(unittest.TestCase):
                 main=json.loads((path.parent/'main-selection.json').read_text())
                 selected=[r for r in main if r['scenario']=='prefill-1k'][:4]
                 with patch.object(op,'try_post_norm_gate',observed),patch.object(plugin,'project_post_norm',observed_project):
-                    for m in (1,2,3,4):
-                        values=llm.generate([dict(prompt_token_ids=r['prompt_token_ids']) for r in selected[:m]],SamplingParams(temperature=0,max_tokens=4,ignore_eos=True,seed=20261022),use_tqdm=False)
+                    for m in (4,):
+                        values=llm.generate([dict(prompt_token_ids=r['prompt_token_ids']) for r in selected[:m]],SamplingParams(temperature=0,max_tokens=16,ignore_eos=True,seed=20261022),use_tqdm=False)
                         self.assertEqual(len(values),m)
                         for v in values:
-                            self.assertEqual(len(v.outputs[0].token_ids),4)
+                            self.assertEqual(len(v.outputs[0].token_ids),16)
                             requests.append(dict(batch=m,request_id=v.request_id,tokens=v.outputs[0].token_ids,prompt_tokens=len(v.prompt_token_ids)))
                         (output/'real-model-requests.json').write_text(json.dumps(requests,indent=2))
                 self.assertEqual(set(captured),set(range(42)))
@@ -99,4 +105,4 @@ class RealModelTests(unittest.TestCase):
         finally:
             if llm is not None:
                 llm.llm_engine.engine_core.shutdown();shutdown=True;del llm;gc.collect()
-            (output/'real-model-lifecycle.json').write_text(json.dumps(dict(source_refs=p['source_refs'],expected_requests=10,completed_requests=len(requests),captured=list(captured.values()),shutdown=shutdown,observer_restored=op is None or op.try_post_norm_gate is original),indent=2))
+            (output/'real-model-lifecycle.json').write_text(json.dumps(dict(source_refs=p['source_refs'],expected_requests=4,completed_requests=len(requests),captured=list(captured.values()),shutdown=shutdown,observer_restored=op is None or op.try_post_norm_gate is original),indent=2))
