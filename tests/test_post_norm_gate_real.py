@@ -11,13 +11,10 @@ class RealModelTests(unittest.TestCase):
         from vllm import LLM, SamplingParams
         from c500_gpu_guard import GpuLease
         from c500_checkpoint_post_load import reclaim_after_load
-        plugin=importlib.import_module('vllm_fl.models.minicpm5_post_norm_gate')
-        op=importlib.import_module('flag_gems.runtime.backend._metax.fused.post_norm_gate')
-        gate=importlib.import_module('flag_gems.runtime.backend._metax.fused.gate_up_silu')
         path=Path(os.environ['C500_FROZEN_PROTOCOL']);p=json.loads(path.read_text())
         output=Path(os.environ['C500_NUMERICAL_CAPTURE_PATH']).parent
         captured={};fallbacks=set();requests=[];llm=None;shutdown=False
-        original=op.try_post_norm_gate;project=plugin.project_post_norm
+        original=None;project=None;op=None;gate=None;plugin=None
         def observed(x,r,nw,w,eps):
             frame=inspect.currentframe().f_back
             layer=frame.f_locals['layer'];norm=frame.f_locals['norm']
@@ -62,6 +59,20 @@ class RealModelTests(unittest.TestCase):
         try:
             with GpuLease() as lease:
                 llm=LLM(model=p['model'],**p['engine'])
+                # Match c500_dev_server: configure plugins/custom ops and create
+                # LLM before importing private model modules for observation.
+                plugin=importlib.import_module('vllm_fl.models.minicpm5_post_norm_gate')
+                op=importlib.import_module('flag_gems.runtime.backend._metax.fused.post_norm_gate')
+                gate=importlib.import_module('flag_gems.runtime.backend._metax.fused.gate_up_silu')
+                original=op.try_post_norm_gate;project=plugin.project_post_norm
+                runner=llm.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner
+                info=[]
+                for index,layer_module in enumerate(runner.model.model.layers):
+                    info.append(dict(layer=index,type=type(layer_module).__qualname__,mlp=type(layer_module.mlp).__qualname__,activation=type(layer_module.mlp.act_fn).__qualname__,norm=type(layer_module.post_attention_layernorm).__qualname__,bound=hasattr(layer_module,'_post_norm_saved'),parent=hasattr(layer_module,'_post_norm_parent')))
+                (output/'model-binding.json').write_text(json.dumps(info,indent=2))
+                self.assertEqual(len(info),42)
+                self.assertTrue(all(v['bound'] and v['parent'] for v in info),'binding failed before any generation')
+
                 reclaim_after_load(path.parent,output/'real-checkpoint-post-load.json',lease,t.cuda.synchronize,p['model'],p['checkpoint_post_load_reclaim'])
                 main=json.loads((path.parent/'main-selection.json').read_text())
                 selected=[r for r in main if r['scenario']=='prefill-1k'][:4]
@@ -88,4 +99,4 @@ class RealModelTests(unittest.TestCase):
         finally:
             if llm is not None:
                 llm.llm_engine.engine_core.shutdown();shutdown=True;del llm;gc.collect()
-            (output/'real-model-lifecycle.json').write_text(json.dumps(dict(source_refs=p['source_refs'],expected_requests=10,completed_requests=len(requests),captured=list(captured.values()),shutdown=shutdown,observer_restored=op.try_post_norm_gate is original),indent=2))
+            (output/'real-model-lifecycle.json').write_text(json.dumps(dict(source_refs=p['source_refs'],expected_requests=10,completed_requests=len(requests),captured=list(captured.values()),shutdown=shutdown,observer_restored=op is None or op.try_post_norm_gate is original),indent=2))
