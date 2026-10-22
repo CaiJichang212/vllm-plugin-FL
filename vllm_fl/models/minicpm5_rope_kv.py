@@ -205,3 +205,8 @@ class MiniCPM5RopeKVForCausalLM(LlamaForCausalLM):
     def __init__(self,*,vllm_config,prefix=''):
         layer_type=RopeKVDecoderLayer if model_supported(vllm_config) else LlamaDecoderLayer
         super().__init__(vllm_config=vllm_config,prefix=prefix,layer_type=layer_type)
+        import weakref
+        for layer in self.model.layers:
+            if isinstance(layer, RopeKVDecoderLayer):
+                layer._post_norm_parent=weakref.ref(self.model)
+

@@ -16,6 +16,14 @@ def allowed(layer, x):
     saved=getattr(layer,'_post_norm_saved',None)
     if saved is None or type(x) is not torch.Tensor or tuple(x.shape)!=(4,2048):
         return False
+    parent_ref=getattr(layer,'_post_norm_parent',None)
+    parent=parent_ref() if parent_ref is not None else None
+    if parent is None or parent.aux_hidden_state_layers:
+        return False
+    norm=layer.post_attention_layernorm
+    if (getattr(norm,'variance_size_override',None) is not None or not getattr(norm,'has_weight',False)
+            or norm.hidden_size!=2048):
+        return False
     modules=(layer.mlp,layer.post_attention_layernorm)
     if any(a is not b for a,b in zip(modules,saved[0])) or tuple(_identity(m) for m in modules)!=saved[1]:
         return False
