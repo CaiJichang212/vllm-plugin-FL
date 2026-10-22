@@ -38,6 +38,20 @@ class RealModelTests(unittest.TestCase):
             violations=(xx.double()-expected).abs()>1e-4+.016*expected.abs()
             if violations.any():t.save(dict(coordinates=violations.nonzero(),actual=xx[violations],reference=expected[violations]),output/f'actual-norm-failure-{layer}.pt')
             self.assertFalse(bool(violations.any()))
+            # Independent FP64 dot, with a conservative FP32 sum error bound
+            # plus one final BF16 rounding. No candidate-specific tolerance.
+            a=xx.double().cpu(); ww=w.double().cpu()
+            exact_dot=a@ww.T
+            magnitude=a.abs()@ww.abs().T
+            actual_dot=gate.paired_intermediate(xx,w).double().cpu()
+            gamma=(2048*2.0**-24)/(1-2048*2.0**-24)
+            acc_bound=gamma*magnitude
+            bound=acc_bound+(exact_dot.abs()+acc_bound)/256+1e-7
+            violations=(actual_dot-exact_dot).abs()>bound
+            if violations.any():
+                t.save(dict(coordinates=violations.nonzero(),actual=actual_dot[violations],reference=exact_dot[violations],bound=bound[violations]),output/f'actual-projection-failure-{layer}.pt')
+            self.assertFalse(bool(violations.any()))
+            del a,ww,exact_dot,magnitude,actual_dot,bound
             captured[layer]=dict(layer=layer,shape=list(x.shape),phase='decode',exact=True,norm_reference=True,meta=sample['meta'])
             return result
         def observed_project(layer,x,r):
