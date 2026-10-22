@@ -50,6 +50,11 @@ class ActualDownLayout(unittest.TestCase):
         stream.synchronize();self.assertTrue(t.equal(hot,ref))
         self.assertIsNone(original(x[:3],w,record))
         self.assertIsNone(original(x[:,::2],w,record))
+        padded=t.empty((4,12288),device=x.device,dtype=x.dtype)
+        self.assertIsNone(original(padded[:,::2],w,record))
+        offset=t.empty((x.numel()+32,),device=x.device,dtype=x.dtype)[16:-16].view_as(x)
+        offset.copy_(x)
+        self.assertTrue(t.equal(original(offset,w,record),ref))
         with t.enable_grad():self.assertIsNone(original(x,w,record))
       captured[layer]=dict(layer=layer,shape=list(x.shape),phase='decode',exact=True,independent_fp64=True)
       return result
@@ -88,6 +93,21 @@ class ActualDownLayout(unittest.TestCase):
         with t.inference_mode():
           mlp=layers[0].mlp;down=mlp.down_proj;record=down._c500_kn_record
           x=t.zeros(4,6144,device='cuda',dtype=t.bfloat16)
+          # The enclosing MLP must preserve real module hooks and replacement.
+          hook_calls=[]
+          handle=down.register_forward_hook(lambda *a:hook_calls.append(True))
+          gate_input=t.zeros((4,2048),device='cuda',dtype=t.bfloat16)
+          try:
+            with patch.object(op,'try_down_kn',side_effect=AssertionError('candidate reached hook path')):mlp(gate_input)
+            self.assertEqual(len(hook_calls),1)
+          finally:handle.remove()
+          class Wrapper(t.nn.Module):
+            def __init__(self,inner):super().__init__();self.inner=inner
+            def forward(self,value):return self.inner(value)
+          mlp.down_proj=Wrapper(down)
+          try:
+            with patch.object(op,'try_down_kn',side_effect=AssertionError('candidate reached replaced module')):mlp(gate_input)
+          finally:mlp.down_proj=down
           # A normal in-place update bumps the original version; no timed repack.
           # The real vLLM loader may update .data without a version bump.
           # Both the module and every retained descriptor must be invalidated.
