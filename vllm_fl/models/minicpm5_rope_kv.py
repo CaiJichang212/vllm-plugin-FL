@@ -180,6 +180,25 @@ class RopeKVDecoderLayer(LlamaDecoderLayer):
         super().__init__(vllm_config=vllm_config,prefix=prefix,attn_layer_type=RopeKVAttention)
         from .minicpm5_ffn_fusion import bind_gate_up_silu
         bind_gate_up_silu(self.mlp, vllm_config, prefix=prefix+'.mlp')
+        # Auxiliary/speculative export paths retain the complete original layer.
+        if getattr(vllm_config, 'speculative_config', None) is None:
+            from .minicpm5_post_norm_gate import snapshot
+            snapshot(self, prefix)
+
+    def forward(self, positions, hidden_states, residual):
+        from .minicpm5_post_norm_gate import project_post_norm
+        if residual is None:
+            residual=hidden_states
+            hidden_states=self.input_layernorm(hidden_states)
+        else:
+            hidden_states,residual=self.input_layernorm(hidden_states,residual)
+        hidden_states=self.self_attn(positions=positions,hidden_states=hidden_states)
+        result=project_post_norm(self,hidden_states,residual)
+        if result is not None:
+            return result
+        hidden_states,residual=self.post_attention_layernorm(hidden_states,residual)
+        return self.mlp(hidden_states),residual
+
 
 
 class MiniCPM5RopeKVForCausalLM(LlamaForCausalLM):
