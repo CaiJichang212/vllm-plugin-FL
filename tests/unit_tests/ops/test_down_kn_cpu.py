@@ -84,6 +84,11 @@ class PhaseContract(unittest.TestCase):
       for prefix in ('bad',None,'model.layers.42.mlp'):
         mlp._c500_ffn_saved['prefix']=prefix;self.assertEqual(ns['project_down_kn'](mlp,x),'old')
       mlp._c500_ffn_saved['prefix']='model.layers.0.mlp'
+      old_weight=mlp.down_proj.weight;old_ref=mlp.down_proj._c500_kn_loader_weight
+      mlp.down_proj._c500_kn_loader_weight=lambda:old_weight
+      mlp.down_proj.weight=NS()
+      self.assertEqual(ns['project_down_kn'](mlp,x),'old')
+      mlp.down_proj.weight=old_weight;mlp.down_proj._c500_kn_loader_weight=old_ref
       def broken(*a):calls.append('error');raise RuntimeError('submitted')
       op.try_down_kn=broken;start=len(calls)
       with self.assertRaisesRegex(RuntimeError,'submitted'):ns['project_down_kn'](mlp,x)
