@@ -68,6 +68,28 @@ def fallback_reason(mlp, x):
     return None
 
 
+def project_down_unroll2(mlp, x):
+    """Only M4 pure decode; caller retains module/hook/TP/quantization guards."""
+    from flag_gems.runtime.backend._metax.fused.down_k_unroll2 import try_down_unroll2
+    from vllm.model_executor.layers.attention.attention import get_attention_context
+    prefix = mlp._c500_ffn_saved['prefix']
+    parts = prefix.split('.') if isinstance(prefix, str) else []
+    layer = int(parts[-2]) if (len(parts) >= 3 and parts[-3] == 'layers'
+                               and parts[-2].isdigit() and parts[-1] == 'mlp') else -1
+    phase = 'outside_domain'
+    if type(x) is torch.Tensor and tuple(x.shape) == (4, 6144) and 0 <= layer < 42:
+        metadata, _, _, _ = get_attention_context(prefix[:-3] + 'self_attn.attn')
+        if (metadata is not None and metadata.num_prefills == 0
+                and metadata.num_prefill_tokens == 0 and metadata.num_decodes == 4
+                and metadata.num_decode_tokens == 4 and metadata.num_actual_tokens == 4):
+            phase = 'decode'
+            out = try_down_unroll2(x, mlp.down_proj.weight)
+            if out is not None:
+                return out
+    out, _ = mlp.down_proj(x)
+    return out
+
+
 def _forward(self, x):
     saved = self._c500_ffn_saved
     reason = fallback_reason(self, x)
@@ -80,8 +102,7 @@ def _forward(self, x):
         if _observe: _counts['fallback:kernel_support'] += 1
         return saved['forward'](x)
     if _observe: _counts['fused:'+saved['prefix']] += 1
-    out, _ = self.down_proj(out)
-    return out
+    return project_down_unroll2(self, out)
 
 
 def bind_gate_up_silu(mlp, config, prefix=''):
