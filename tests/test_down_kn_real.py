@@ -10,12 +10,9 @@ class ActualDownLayout(unittest.TestCase):
     from vllm import LLM,SamplingParams
     from c500_gpu_guard import GpuLease
     from c500_checkpoint_post_load import reclaim_after_load
-    plugin=importlib.import_module('vllm_fl.models.minicpm5_down_kn')
-    op=importlib.import_module('flag_gems.runtime.backend._metax.fused.down_weight_kn')
-    gate=importlib.import_module('flag_gems.runtime.backend._metax.fused.gate_up_silu')
     path=Path(os.environ['C500_FROZEN_PROTOCOL']);p=json.loads(path.read_text())
     output=Path(os.environ['C500_NUMERICAL_CAPTURE_PATH']).parent
-    original=op.try_down_kn;project=plugin.project_down_kn
+    original=None;project=None;plugin=None;op=None;gate=None
     captured={};fallbacks=set();requests=[];llm=None;shutdown=False
     def observe(x,w,record):
       caller=inspect.currentframe().f_back
@@ -53,6 +50,11 @@ class ActualDownLayout(unittest.TestCase):
     try:
       with GpuLease() as lease:
         llm=LLM(model=p['model'],**p['engine'])
+        plugin=importlib.import_module('vllm_fl.models.minicpm5_down_kn')
+        op=importlib.import_module('flag_gems.runtime.backend._metax.fused.down_weight_kn')
+        gate=importlib.import_module('flag_gems.runtime.backend._metax.fused.gate_up_silu')
+        original=op.try_down_kn;project=plugin.project_down_kn
+
         reclaim_after_load(path.parent,output/'checkpoint-post-load.json',lease,t.cuda.synchronize,p['model'],p['checkpoint_post_load_reclaim'])
         runner=llm.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner
         layers=runner.model.model.layers
@@ -96,4 +98,4 @@ class ActualDownLayout(unittest.TestCase):
     finally:
       if llm is not None:
         llm.llm_engine.engine_core.shutdown();shutdown=True;del llm;gc.collect()
-      (output/'real-model-lifecycle.json').write_text(json.dumps(dict(source_refs=p['source_refs'],expected_requests=10,completed_requests=len(requests),captured=list(captured.values()),shutdown=shutdown,observer_restored=op.try_down_kn is original),indent=2))
+      (output/'real-model-lifecycle.json').write_text(json.dumps(dict(source_refs=p['source_refs'],expected_requests=10,completed_requests=len(requests),captured=list(captured.values()),shutdown=shutdown,observer_restored=op is None or op.try_down_kn is original),indent=2))
