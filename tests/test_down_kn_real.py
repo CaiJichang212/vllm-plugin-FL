@@ -79,6 +79,13 @@ class ActualDownLayout(unittest.TestCase):
           mlp=layers[0].mlp;down=mlp.down_proj;record=down._c500_kn_record
           x=t.zeros(4,6144,device='cuda',dtype=t.bfloat16)
           # A normal in-place update bumps the original version; no timed repack.
+          # The real vLLM loader may update .data without a version bump.
+          # Both the module and every retained descriptor must be invalidated.
+          down.weight.weight_loader(down.weight,down.weight.detach().clone())
+          self.assertIsNone(down._c500_kn_record)
+          self.assertIsNone(original(x,down.weight,record))
+          down.quant_method.process_weights_after_loading(down)
+          record=down._c500_kn_record
           down.weight.add_(0)
           self.assertIsNone(original(x,down.weight,record))
           down.quant_method.process_weights_after_loading(down)

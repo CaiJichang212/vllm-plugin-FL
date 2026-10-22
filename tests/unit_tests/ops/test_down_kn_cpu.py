@@ -43,7 +43,7 @@ class Contracts(unittest.TestCase):
  def test_packed_mutation_rejected_before_launch(self):
     x=Tensor();x.shape=(4,6144);packed=Tensor();old=self.ns['tensor_stamp'](self.w);ps=self.ns['tensor_stamp'](packed);packed._version=2
     ns=extract({'try_down_kn'},dict(self.ns,_baseline_record=lambda *a:self.fail('launch preparation reached')))
-    self.assertIsNone(ns['try_down_kn'](x,self.w,(packed,old,ps)))
+    self.assertIsNone(ns['try_down_kn'](x,self.w,[packed,old,ps,True]))
  def test_no_record_rejected(self):
     ns=extract({'try_down_kn'},dict(self.ns));self.assertIsNone(ns['try_down_kn'](None,None,None))
 
@@ -60,7 +60,7 @@ class PhaseContract(unittest.TestCase):
     def candidate(*a):calls.append('new');return 'new'
     op.try_down_kn=candidate
     class Down:
-      weight=object();_c500_kn_record=(object(),None,None)
+      weight=NS(weight_loader='loader');_c500_kn_loader='loader';_c500_kn_record=[object(),None,None,True]
       def __init__(self):
         self._c500_kn_weight=self._c500_kn_record[0]
         self.quant_method=NS(process_weights_after_loading='post')
