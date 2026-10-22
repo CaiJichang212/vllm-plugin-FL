@@ -86,4 +86,34 @@ class PhaseContract(unittest.TestCase):
       with self.assertRaisesRegex(RuntimeError,'submitted'):ns['project_down_kn'](mlp,x)
       self.assertEqual(calls[start:],['error'])
 
+
+class LoaderInvalidation(unittest.TestCase):
+ def helpers(self):
+    path=ROOT/'vllm_fl/models/minicpm5_down_kn.py'
+    nodes=[n for n in ast.parse(path.read_text()).body if isinstance(n,ast.FunctionDef) and n.name in ('invalidate','install_loader_guard')]
+    ns={};exec(compile(ast.Module(body=nodes,type_ignores=[]),str(path),'exec'),ns);return ns
+ def test_real_loader_contract_invalidates_before_data_copy(self):
+    ns=self.helpers();record=[object(),None,None,True];events=[]
+    weight=Tensor();down=NS(weight=weight,_c500_kn_record=record,_c500_kn_weight=record[0])
+    def raw(param,value):
+      self.assertIs(param,weight);self.assertFalse(record[3]);self.assertIsNone(down._c500_kn_record)
+      events.append(value)
+    weight.weight_loader=raw
+    self.assertTrue(ns['install_loader_guard'](down));wrapped=weight.weight_loader
+    self.assertTrue(ns['install_loader_guard'](down));self.assertIs(wrapped,weight.weight_loader)
+    before=weight._version;weight.weight_loader(weight,'new-values')
+    self.assertEqual(events,['new-values']);self.assertEqual(weight._version,before)
+    self.assertIsNone(down._c500_kn_weight)
+ def test_failed_loader_cannot_leave_stale_record_usable(self):
+    ns=self.helpers();record=[object(),None,None,True];weight=Tensor()
+    def raw(*a):raise RuntimeError('load failed')
+    weight.weight_loader=raw;down=NS(weight=weight,_c500_kn_record=record,_c500_kn_weight=record[0])
+    ns['install_loader_guard'](down)
+    with self.assertRaisesRegex(RuntimeError,'load failed'):weight.weight_loader(weight,None)
+    self.assertFalse(record[3]);self.assertIsNone(down._c500_kn_record)
+ def test_no_loader_uses_original_path(self):
+    down=NS(weight=Tensor());self.assertFalse(self.helpers()['install_loader_guard'](down))
+ def test_invalid_descriptor_returns_before_any_tensor_inspection(self):
+    ns=extract({'try_down_kn'},{});self.assertIsNone(ns['try_down_kn'](None,None,[None,None,None,False]))
+
 if __name__=='__main__':unittest.main(verbosity=2)
