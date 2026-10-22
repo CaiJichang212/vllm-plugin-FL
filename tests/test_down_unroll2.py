@@ -101,6 +101,8 @@ class HostContract(unittest.TestCase):
         self.assertEqual(ast.unparse(loops[1].iter),'tl.static_range(0, 2)')
         dots=[n for n in ast.walk(fn) if isinstance(n,ast.Call) and ast.unparse(n.func)=='tl.dot']
         self.assertEqual(len(dots),1)
+        self.assertFalse(any(isinstance(n,ast.AugAssign) and isinstance(n.target,ast.Name)
+                             and n.target.id in ('xp','wp') for n in ast.walk(fn)))
         for bk in (16,32,64,128,256):
             order=[(group*2+inner)*bk+k for group in range(6144//(2*bk)) for inner in range(2) for k in range(bk)]
             self.assertEqual(order,list(range(6144)))
