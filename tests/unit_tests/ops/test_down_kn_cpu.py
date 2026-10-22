@@ -63,7 +63,8 @@ class PhaseContract(unittest.TestCase):
       weight=NS(weight_loader='loader');_c500_kn_loader='loader';_c500_kn_record=[object(),None,None,True]
       def __init__(self):
         self._c500_kn_weight=self._c500_kn_record[0]
-        self.quant_method=NS(process_weights_after_loading='post')
+        self._c500_kn_apply=object()
+        self.quant_method=NS(process_weights_after_loading='post',apply=self._c500_kn_apply)
         self._c500_kn_post_load='post'
       def __call__(self,x):calls.append('old');return 'old',None
     mlp=NS(down_proj=Down(),_c500_ffn_saved=dict(prefix='model.layers.0.mlp'))
