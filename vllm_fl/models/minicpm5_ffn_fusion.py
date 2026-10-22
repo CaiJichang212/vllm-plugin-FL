@@ -80,8 +80,8 @@ def _forward(self, x):
         if _observe: _counts['fallback:kernel_support'] += 1
         return saved['forward'](x)
     if _observe: _counts['fused:'+saved['prefix']] += 1
-    out, _ = self.down_proj(out)
-    return out
+    from .minicpm5_down_kn import project_down_kn
+    return project_down_kn(self, out)
 
 
 def bind_gate_up_silu(mlp, config, prefix=''):

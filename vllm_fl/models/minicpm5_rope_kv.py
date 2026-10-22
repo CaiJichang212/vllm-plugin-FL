@@ -180,6 +180,8 @@ class RopeKVDecoderLayer(LlamaDecoderLayer):
         super().__init__(vllm_config=vllm_config,prefix=prefix,attn_layer_type=RopeKVAttention)
         from .minicpm5_ffn_fusion import bind_gate_up_silu
         bind_gate_up_silu(self.mlp, vllm_config, prefix=prefix+'.mlp')
+        from .minicpm5_down_kn import bind_down_kn
+        bind_down_kn(self.mlp)
 
 
 class MiniCPM5RopeKVForCausalLM(LlamaForCausalLM):
