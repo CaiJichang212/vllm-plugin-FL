@@ -78,7 +78,7 @@ def project_down_kn(mlp,x):
     phase='outside_domain'
     record=getattr(down,'_c500_kn_record',None)
     apply=down.quant_method.apply
-    if (0<=layer<42 and record is not None and type(x) is torch.Tensor and tuple(x.shape)==(4,6144)
+    if (0<=layer<42 and isinstance(record,list) and len(record)==4 and record[3] is True and type(x) is torch.Tensor and tuple(x.shape)==(4,6144)
             and down.quant_method.process_weights_after_loading==down._c500_kn_post_load
             and down._c500_kn_weight is record[0]
             and down.weight.weight_loader is down._c500_kn_loader

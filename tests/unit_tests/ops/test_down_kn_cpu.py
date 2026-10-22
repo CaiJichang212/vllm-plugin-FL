@@ -45,7 +45,9 @@ class Contracts(unittest.TestCase):
     ns=extract({'try_down_kn'},dict(self.ns,_baseline_record=lambda *a:self.fail('launch preparation reached')))
     self.assertIsNone(ns['try_down_kn'](x,self.w,[packed,old,ps,True]))
  def test_no_record_rejected(self):
-    ns=extract({'try_down_kn'},dict(self.ns));self.assertIsNone(ns['try_down_kn'](None,None,None))
+    ns=extract({'try_down_kn'},dict(self.ns))
+    for record in (None,(),[None],[None,None,None],(None,None,None,True)):
+      self.assertIsNone(ns['try_down_kn'](None,None,record))
 
 class PhaseContract(unittest.TestCase):
  def test_stage_guard_and_no_post_submission_retry(self):

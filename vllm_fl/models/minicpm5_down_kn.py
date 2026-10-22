@@ -5,7 +5,7 @@ from types import MethodType
 
 def invalidate(down):
     record=getattr(down,'_c500_kn_record',None)
-    if record is not None:
+    if isinstance(record,list) and len(record)==4:
         record[3]=False
     down._c500_kn_record=None
     down._c500_kn_weight=None
