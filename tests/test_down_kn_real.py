@@ -35,6 +35,16 @@ class ActualDownLayout(unittest.TestCase):
       if violation.any():t.save(dict(coordinates=violation.nonzero(),actual=result.double().cpu()[violation],reference=dot[violation],bound=bound[violation]),output/f'down-reference-failure-{layer}.pt')
       self.assertFalse(bool(violation.any()))
       if layer==0:
+        backing=t.full((4*2048+32,),-17,device=x.device,dtype=x.dtype)
+        target=backing[16:-16].view(4,2048)
+        allocate=t.empty
+        def guarded(*args,**kwargs):
+          return target if args and args[0]==(4,2048) else allocate(*args,**kwargs)
+        with patch.object(t,'empty',side_effect=guarded):bounded=original(x,w,record)
+        t.cuda.synchronize()
+        self.assertTrue(t.equal(bounded,ref))
+        self.assertTrue(bool((backing[:16]==-17).all()))
+        self.assertTrue(bool((backing[-16:]==-17).all()))
         stream=t.cuda.Stream();stream.wait_stream(t.cuda.current_stream())
         with t.cuda.stream(stream):hot=original(x,w,record)
         stream.synchronize();self.assertTrue(t.equal(hot,ref))
