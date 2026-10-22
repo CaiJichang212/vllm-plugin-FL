@@ -13,6 +13,7 @@ class Contract(unittest.TestCase):
         class T:
             shape=(4,2048);device='cuda';dtype='bf16'
             def view(self,*shape):return self
+            def as_strided(self,*args):return self
             def split(self,*args,**kw):return (self,self,self)
         def proj(x):events.append('projection');return T(),None
         def out(x):events.append('out');return T(),None
@@ -27,7 +28,8 @@ class Contract(unittest.TestCase):
                 fallback_reason=lambda *a:None,os=N(environ={}),trace=lambda *a:None,
                 fused_attention=lambda *a:events.append('old_rope'),)
         tree=ast.parse(SOURCE.read_text());cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='RopeKVAttention');fn=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='forward')
-        exec(compile(ast.Module(body=[fn],type_ignores=[]),str(SOURCE),'exec'),ns)
+        helper=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_paired_qkv_attention_outputs')
+        exec(compile(ast.Module(body=[helper,fn],type_ignores=[]),str(SOURCE),'exec'),ns)
         layer=N(qkv_proj=proj,o_proj=out,q_size=2048,kv_size=256,attn=N(layer_name='layer'),rotary_emb=N(cos_sin_cache=N(to=lambda _:None)))
         return lambda:ns['forward'](layer,positions=N(device='cuda'),hidden_states=T()),events
 

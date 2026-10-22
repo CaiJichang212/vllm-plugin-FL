@@ -123,12 +123,12 @@ def qkv_fallback_reason(self, positions, hidden, metadata, cache):
 
 
 @maybe_transfer_kv_layer
-def fused_qkv_attention(self, positions, hidden_states, output, layer_name):
+def fused_qkv_attention(self, positions, hidden_states, output, layer_name, qkv_output=None):
     # Wait for transfer BEFORE projection/cache writes, save after attention.
     metadata, layer, cache, _ = get_attention_context(layer_name)
     from flag_gems.runtime.backend._metax.fused.qkv_rope_cache import try_qkv_rope_cache
     qkv = try_qkv_rope_cache(hidden_states, self.qkv_proj.weight, positions,
-                             self.rotary_emb.cos_sin_cache, cache, metadata.slot_mapping)
+                             self.rotary_emb.cos_sin_cache, cache, metadata.slot_mapping, out=qkv_output)
     if qkv is None: raise RuntimeError('QKV support changed after transfer wait; no fallback')
     q, k, v = qkv.split([2048, 256, 256], dim=-1)
     q = q.view(-1, 16, 128); k = k.view(-1, 2, 128); v = v.view(-1, 2, 128)
@@ -137,6 +137,15 @@ def fused_qkv_attention(self, positions, hidden_states, output, layer_name):
     if _qkv_observe: _qkv_counts[layer_name] = _qkv_counts.get(layer_name, 0) + 1
     trace(layer_name, 'qkv_rope_cache')
     return True
+
+
+def _paired_qkv_attention_outputs(hidden):
+    """One invocation owns fresh, disjoint, contiguous destinations; no cache."""
+    m = hidden.shape[0]
+    workspace = torch.empty((m * 4608,), device=hidden.device, dtype=hidden.dtype)
+    qkv = workspace.as_strided((m, 2560), (2560, 1), 0)
+    attention = workspace.as_strided((m, 16, 128), (2048, 128, 1), m * 2560)
+    return qkv, attention
 
 
 class RopeKVAttention(LlamaAttention):
@@ -150,9 +159,8 @@ class RopeKVAttention(LlamaAttention):
     def forward(self, positions, hidden_states):
         metadata, _, cache, _ = get_attention_context(self.attn.layer_name)
         if qkv_fallback_reason(self, positions, hidden_states, metadata, cache) is None:
-            fused_output = torch.empty((hidden_states.shape[0], 16, 128),
-                                       device=hidden_states.device, dtype=hidden_states.dtype)
-            if fused_qkv_attention(self, positions, hidden_states, fused_output, self.attn.layer_name):
+            qkv_output, fused_output = _paired_qkv_attention_outputs(hidden_states)
+            if fused_qkv_attention(self, positions, hidden_states, fused_output, self.attn.layer_name, qkv_output):
                 output, _ = self.o_proj(fused_output.view(-1, self.q_size))
                 return output
         qkv,_=self.qkv_proj(hidden_states)
