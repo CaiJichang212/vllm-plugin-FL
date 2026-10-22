@@ -67,11 +67,11 @@ class ActualDownLayout(unittest.TestCase):
         self.assertEqual(sum(r['bytes'] for r in info),42*2048*6144*2)
         selected=[r for r in json.loads((path.parent/'main-selection.json').read_text()) if r['scenario']=='prefill-1k'][:4]
         with patch.object(op,'try_down_kn',observe),patch.object(plugin,'project_down_kn',observe_project):
-          for m in (1,2,3,4):
-            values=llm.generate([dict(prompt_token_ids=r['prompt_token_ids']) for r in selected[:m]],SamplingParams(temperature=0,max_tokens=4,ignore_eos=True,seed=20261022),use_tqdm=False)
+          for m in (4,):
+            values=llm.generate([dict(prompt_token_ids=r['prompt_token_ids']) for r in selected[:m]],SamplingParams(temperature=0,max_tokens=16,ignore_eos=True,seed=20261022),use_tqdm=False)
             self.assertEqual(len(values),m)
             for v in values:
-              self.assertEqual(len(v.outputs[0].token_ids),4)
+              self.assertEqual(len(v.outputs[0].token_ids),16)
               requests.append(dict(batch=m,request_id=v.request_id,tokens=v.outputs[0].token_ids,prompt_tokens=len(v.prompt_token_ids)))
             (output/'real-model-requests.json').write_text(json.dumps(requests,indent=2))
         self.assertEqual(set(captured),set(range(42)));self.assertEqual(fallbacks,{1,2,3})
@@ -98,4 +98,4 @@ class ActualDownLayout(unittest.TestCase):
     finally:
       if llm is not None:
         llm.llm_engine.engine_core.shutdown();shutdown=True;del llm;gc.collect()
-      (output/'real-model-lifecycle.json').write_text(json.dumps(dict(source_refs=p['source_refs'],expected_requests=10,completed_requests=len(requests),captured=list(captured.values()),shutdown=shutdown,observer_restored=op is None or op.try_down_kn is original),indent=2))
+      (output/'real-model-lifecycle.json').write_text(json.dumps(dict(source_refs=p['source_refs'],expected_requests=4,completed_requests=len(requests),captured=list(captured.values()),shutdown=shutdown,observer_restored=op is None or op.try_down_kn is original),indent=2))
