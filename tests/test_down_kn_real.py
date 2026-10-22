@@ -60,7 +60,7 @@ class ActualDownLayout(unittest.TestCase):
     try:
       with GpuLease() as lease:
         llm=LLM(model=p['model'],**p['engine'])
-        plugin=importlib.import_module('vllm_fl.models.minicpm5_down_kn')
+        plugin=importlib.import_module('vllm_fl.models.minicpm5_ffn_fusion')
         op=importlib.import_module('flag_gems.runtime.backend._metax.fused.down_weight_kn')
         gate=importlib.import_module('flag_gems.runtime.backend._metax.fused.gate_up_silu')
         original=op.try_down_kn;project=plugin.project_down_kn

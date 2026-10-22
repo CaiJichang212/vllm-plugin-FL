@@ -68,7 +68,7 @@ class PhaseContract(unittest.TestCase):
         self._c500_kn_post_load='post'
       def __call__(self,x):calls.append('old');return 'old',None
     mlp=NS(down_proj=Down(),_c500_ffn_saved=dict(prefix='model.layers.0.mlp'))
-    path=ROOT/'vllm_fl/models/minicpm5_down_kn.py'
+    path=ROOT/'vllm_fl/models/minicpm5_ffn_fusion.py'
     nodes=[n for n in ast.parse(path.read_text()).body if isinstance(n,ast.FunctionDef) and n.name=='project_down_kn']
     ns=dict(torch=NS(Tensor=Tensor),fallback_reason=lambda *a:None,get_attention_context=attention.get_attention_context)
     exec(compile(ast.Module(body=nodes,type_ignores=[]),str(path),'exec'),ns)
