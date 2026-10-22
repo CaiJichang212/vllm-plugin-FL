@@ -195,6 +195,8 @@ class RopeKVDecoderLayer(LlamaDecoderLayer):
         hidden_states=self.self_attn(positions=positions,hidden_states=hidden_states)
         result=project_post_norm(self,hidden_states,residual)
         if result is not None:
+            layer=int(self._post_norm_saved[2].split('.')[-1])
+            phase='decode'
             return result
         hidden_states,residual=self.post_attention_layernorm(hidden_states,residual)
         return self.mlp(hidden_states),residual
