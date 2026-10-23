@@ -23,6 +23,7 @@ def extract(names,namespace):
 
 class Tensor:
     shape=(4,6144)
+    ndim=2
 
 
 def context():
@@ -45,13 +46,18 @@ class HostContract(unittest.TestCase):
             for layer in range(42):
                 mlp._c500_ffn_saved['prefix']=f'model.layers.{layer}.mlp'
                 self.assertEqual(ns['project_down_direct'](mlp,Tensor()),'direct')
+            for m in (1,2,3,4):
+                x=Tensor();x.shape=(m,6144)
+                for field in ('num_decodes','num_decode_tokens','num_actual_tokens'):setattr(meta,field,m)
+                self.assertEqual(ns['project_down_direct'](mlp,x),'direct')
+            for field in ('num_decodes','num_decode_tokens','num_actual_tokens'):setattr(meta,field,4)
             for field in vars(meta):
                 old=getattr(meta,field);setattr(meta,field,1)
                 self.assertEqual(ns['project_down_direct'](mlp,Tensor()),'fallback');setattr(meta,field,old)
             down._compiled_call_impl=object();self.assertEqual(ns['project_down_direct'](mlp,Tensor()),'fallback');down._compiled_call_impl=None
             for field in ('input_is_parallel','return_bias'):
                 setattr(down,field,False);self.assertEqual(ns['project_down_direct'](mlp,Tensor()),'fallback');setattr(down,field,True)
-            for m in (1,2,3,5,1024):
+            for m in (0,5,1024):
                 x=Tensor();x.shape=(m,6144);self.assertEqual(ns['project_down_direct'](mlp,x),'fallback')
             for prefix in ('bad','model.layers.42.mlp',None):
                 mlp._c500_ffn_saved['prefix']=prefix;self.assertEqual(ns['project_down_direct'](mlp,Tensor()),'fallback')
@@ -97,8 +103,9 @@ class DeviceContract(unittest.TestCase):
                     down.weight=ModelWeightParameter(data=w,input_dim=1,output_dim=0,weight_loader=lambda *a:None)
                 mlp=NS(down_proj=down,_c500_ffn_saved={'prefix':f'model.layers.{layer}.mlp'})
                 original=actual['x'].to('cuda');savedw=w.clone()
-                cases=[('actual',original)]+[(f'scale{scale}',t.randn((4,6144),device='cuda',dtype=t.bfloat16)*scale) for scale in (0.,1.,8.)]
+                cases=[(f'actual-m{m}',original[:m]) for m in (1,2,3,4)]+[(f'scale{scale}-m{m}',t.randn((m,6144),device='cuda',dtype=t.bfloat16)*scale) for m in (1,2,3,4) for scale in (0.,1.,8.)]
                 for label,x in cases:
+                    for field in ('num_decodes','num_decode_tokens','num_actual_tokens'):setattr(meta,field,x.shape[0])
                     saved=x.clone();a,_=down(x);b=ns['project_down_direct'](mlp,x);stream.synchronize()
                     if not t.equal(a,b):t.save(dict(layer=layer,label=label,A=a.cpu(),B=b.cpu(),coordinates=(a!=b).nonzero().cpu()),output/f'exact-failure-{layer}-{label}.pt')
                     self.assertTrue(t.equal(a,b),(layer,label))
@@ -110,6 +117,7 @@ class DeviceContract(unittest.TestCase):
                     self.assertFalse(bool(violation.any()),(layer,label,'FP64'))
                     self.assertTrue(t.equal(x,saved));self.assertTrue(t.equal(w,savedw))
                     del aa,ww,ref,mag,error,bound,violation
+                for field in ('num_decodes','num_decode_tokens','num_actual_tokens'):setattr(meta,field,4)
                 if layer==0:
                     offset=t.empty((4*6144+8,),device='cuda',dtype=t.bfloat16)[8:].view(4,6144);offset.copy_(original)
                     for x in (offset,t.empty((4,12288),device='cuda',dtype=t.bfloat16)[:,::2].copy_(original),w[:4]):
@@ -117,7 +125,7 @@ class DeviceContract(unittest.TestCase):
                     # The direct path must use a changed apply implementation now, not a cached callable.
                     with patch.object(down.quant_method,'apply',return_value='current'):
                         self.assertEqual(ns['project_down_direct'](mlp,original),'current')
-                rows.append(dict(layer=layer,shape=[4,6144],exact=True,fp64=True,cases=4,weight_type=type(down.weight).__qualname__))
+                rows.append(dict(layer=layer,shapes=[[m,6144] for m in (1,2,3,4)],exact=True,fp64=True,cases=16,weight_type=type(down.weight).__qualname__))
                 (output/'down-direct-coverage.json').write_text(json.dumps(rows,indent=2))
                 del down,mlp,w,savedw,original,cases,a,b,x
         stream.synchronize();self.assertEqual(len(rows),42)
