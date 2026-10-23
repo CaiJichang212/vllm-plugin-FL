@@ -207,4 +207,19 @@ class DeviceContract(unittest.TestCase):
         stream.synchronize();self.assertEqual(len(rows),42)
 
 
+
+
+class FrozenHitContract(unittest.TestCase):
+    def test_frozen_product_and_branch_match_implemented_decode_domain(self):
+        protocol = Path(os.environ['C500_FROZEN_PROTOCOL'])
+        spec = json.loads(protocol.read_text())['declaration']['hit']
+        self.assertEqual(spec['required_shapes'], [[m, 6144] for m in (1, 2, 3, 4)])
+        self.assertEqual(spec['required_phases'], ['decode'])
+        self.assertEqual(spec['required_layers'], list(range(42)))
+        helper = next(n for n in ast.parse(SOURCE.read_text()).body
+                      if isinstance(n, ast.FunctionDef) and n.name == spec['branch']['qualname'])
+        guarded_returns = [node.lineno for stmt in helper.body if isinstance(stmt, ast.If)
+                           for node in ast.walk(stmt) if isinstance(node, ast.Return)]
+        self.assertIn(spec['branch']['line'], guarded_returns)
+
 if __name__=='__main__':unittest.main()
