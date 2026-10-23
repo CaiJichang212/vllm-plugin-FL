@@ -69,7 +69,7 @@ def fallback_reason(mlp, x):
 
 
 def project_down_cta_order(mlp, x):
-    """Only M4 pure decode; caller retains module/hook/TP/quantization guards."""
+    """Only M1..4 pure decode; caller retains module/hook/TP/quantization guards."""
     from flag_gems.runtime.backend._metax.fused.down_cta_order import try_down_cta_order
     from vllm.model_executor.layers.attention.attention import get_attention_context
     prefix = mlp._c500_ffn_saved['prefix']
@@ -77,11 +77,11 @@ def project_down_cta_order(mlp, x):
     layer = int(parts[-2]) if (len(parts) >= 3 and parts[-3] == 'layers'
                                and parts[-2].isdigit() and parts[-1] == 'mlp') else -1
     phase = 'outside_domain'
-    if type(x) is torch.Tensor and tuple(x.shape) == (4, 6144) and 0 <= layer < 42:
+    if type(x) is torch.Tensor and x.ndim == 2 and 1 <= x.shape[0] <= 4 and x.shape[1] == 6144 and 0 <= layer < 42:
         metadata, _, _, _ = get_attention_context(prefix[:-3] + 'self_attn.attn')
         if (metadata is not None and metadata.num_prefills == 0
-                and metadata.num_prefill_tokens == 0 and metadata.num_decodes == 4
-                and metadata.num_decode_tokens == 4 and metadata.num_actual_tokens == 4):
+                and metadata.num_prefill_tokens == 0 and metadata.num_decodes == x.shape[0]
+                and metadata.num_decode_tokens == x.shape[0] and metadata.num_actual_tokens == x.shape[0]):
             phase = 'decode'
             out = try_down_cta_order(x, mlp.down_proj.weight)
             if out is not None:

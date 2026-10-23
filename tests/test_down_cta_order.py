@@ -30,6 +30,7 @@ def extract(path,names,namespace):
 
 class Tensor:
     shape=(4,6144)
+    ndim=2
 
 
 class HostContract(unittest.TestCase):
@@ -48,13 +49,18 @@ class HostContract(unittest.TestCase):
             for layer in range(42):
                 mlp._c500_ffn_saved['prefix']=f'model.layers.{layer}.mlp'
                 self.assertEqual(ns['project_down_cta_order'](mlp,Tensor()),'candidate')
+            for m in (1,2,3,4):
+                x=Tensor();x.shape=(m,6144)
+                for field in ('num_decodes','num_decode_tokens','num_actual_tokens'):setattr(meta,field,m)
+                self.assertEqual(ns['project_down_cta_order'](mlp,x),'candidate')
+            for field in ('num_decodes','num_decode_tokens','num_actual_tokens'):setattr(meta,field,4)
             for name in vars(meta):
                 old=getattr(meta,name);setattr(meta,name,1)
                 self.assertEqual(ns['project_down_cta_order'](mlp,Tensor()),'fallback');setattr(meta,name,old)
             for prefix in ('bad','model.layers.42.mlp',None):
                 mlp._c500_ffn_saved['prefix']=prefix;self.assertEqual(ns['project_down_cta_order'](mlp,Tensor()),'fallback')
             mlp._c500_ffn_saved['prefix']='model.layers.0.mlp'
-            for m in (1,2,3,5,1024):
+            for m in (0,5,1024):
                 x=Tensor();x.shape=(m,6144);self.assertEqual(ns['project_down_cta_order'](mlp,x),'fallback')
             op.try_down_cta_order=lambda *a:None
             self.assertEqual(ns['project_down_cta_order'](mlp,Tensor()),'fallback')
@@ -87,13 +93,21 @@ class HostContract(unittest.TestCase):
         ns=extract(KERNEL,{'try_down_cta_order'},dict(supported=lambda *a:True,launch=launch,_cache=lambda _:cache,
             down_cta_order_kernel=jit,torch=NS(empty=lambda *a,**kw:out),
             triton=NS(cdiv=lambda a,b:(a+b-1)//b),torch_device_fn=NS(device=lambda _:contextlib.nullcontext())))
-        x=NS(device=NS(index=0),dtype='bf16');run=lambda:ns['try_down_cta_order'](x,None)
+        x=NS(device=NS(index=0),dtype='bf16',shape=(4,6144));run=lambda:ns['try_down_cta_order'](x,None)
         self.assertIs(run(),out);self.assertEqual(events[-1],('launch',(1,64,1),dict(meta,SWIZZLE=True)))
         self.assertIs(run(),out);self.assertEqual(events[-1][0],'warm')
         dep.valid=False;self.assertIs(run(),out);self.assertEqual(events[-1][0],'launch')
         cache.clear();meta['BLOCK_SIZE_K']=4096;before=len(events);self.assertIsNone(run());self.assertEqual(len(events),before)
         meta['BLOCK_SIZE_K']=32;launch._jit_stamp=lambda _:None
         self.assertIsNone(run());self.assertEqual(len(events),before)
+
+    def test_true_return_site_is_distinct_from_fallback(self):
+        fn=next(n for n in ast.parse(SOURCE.read_text()).body if isinstance(n,ast.FunctionDef) and n.name=='project_down_cta_order')
+        guarded=[n for n in ast.walk(fn) if isinstance(n,ast.If) and ast.unparse(n.test)=='out is not None']
+        self.assertEqual(len(guarded),1)
+        candidate=guarded[0].body[0];fallback=fn.body[-1]
+        self.assertIsInstance(candidate,ast.Return);self.assertEqual(ast.unparse(candidate.value),'out')
+        self.assertIsInstance(fallback,ast.Return);self.assertNotEqual(candidate.lineno,fallback.lineno)
 
     def test_permutation_and_unchanged_reduction(self):
         tree=ast.parse(KERNEL.read_text());fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='down_cta_order_kernel')
@@ -137,26 +151,26 @@ class DeviceContract(unittest.TestCase):
                 with patch.object(parameter,'get_tensor_model_parallel_rank',return_value=0),patch.object(parameter,'get_tensor_model_parallel_world_size',return_value=1):
                     weight=parameter.ModelWeightParameter(data=w,input_dim=1,output_dim=0,weight_loader=lambda *a:None)
                 savedw=weight.clone();original=actual['x'].to('cuda')
-                cases=[('actual',original)]+[(f'scale{scale}',t.randn((4,6144),device='cuda',dtype=t.bfloat16)*scale) for scale in (0.,1.,8.)]
+                cases=[(f'actual-m{m}',original[:m]) for m in (1,2,3,4)]+[(f'scale{scale}-m{m}',t.randn((m,6144),device='cuda',dtype=t.bfloat16)*scale) for m in (1,2,3,4) for scale in (0.,1.,8.)]
                 for label,x in cases:
                     saved=x.clone();op.clear_cache();a=linear.linear(x,weight);meta=op.launch._baseline_record(x,weight)
                     self.assertEqual(meta,item['meta'])
                     b=op.try_down_cta_order(x,weight);stream.synchronize();self.assertIsNotNone(b)
-                    if label=='actual':self.assertTrue(t.equal(a.cpu(),actual['reference']),'historical input baseline output changed')
+                    if label.startswith('actual-m'):self.assertTrue(t.equal(a.cpu(),actual['reference'][:x.shape[0]]),'historical input baseline output changed')
 
-                    if layer==0 and label=='actual':
+                    if layer==0 and label.startswith('actual-m'):
                         record=next(iter(op._cache(x.device.index).values()));candidate_kernel=record[4]
-                        control=t.empty((4,2048),device=x.device,dtype=x.dtype)
-                        control_kernel=op.down_cta_order_kernel[(1,64,1)](x,weight,control,4,6144,2048,SWIZZLE=False,**meta)
+                        control=t.empty((x.shape[0],2048),device=x.device,dtype=x.dtype)
+                        control_kernel=op.down_cta_order_kernel[(1,64,1)](x,weight,control,x.shape[0],6144,2048,SWIZZLE=False,**meta)
                         stream.synchronize();self.assertTrue(t.equal(a,control))
                         binaries={}
                         for tag,kernel in [('linear_order',control_kernel),('transposed_order',candidate_kernel)]:
                             binary=kernel.asm['mcfatbin']
                             self.assertIsInstance(binary,bytes)
-                            (output/f'cta-{tag}.mcfatbin').write_bytes(binary)
+                            (output/f'cta-m{x.shape[0]}-{tag}.mcfatbin').write_bytes(binary)
                             binaries[tag]=dict(bytes=len(binary),sha256=hashlib.sha256(binary).hexdigest(),asm_keys=list(kernel.asm))
                         changed=binaries['linear_order']['sha256']!=binaries['transposed_order']['sha256']
-                        (output/'cta-order-codegen.json').write_text(json.dumps(dict(binaries=binaries,different=changed,scope='machine-code identity differs; arithmetic equality separately checked; does not establish hardware issue order or benefit'),indent=2))
+                        (output/f'cta-order-codegen-m{x.shape[0]}.json').write_text(json.dumps(dict(binaries=binaries,different=changed,scope='machine-code identity differs; arithmetic equality separately checked; does not establish hardware issue order or benefit'),indent=2))
                         self.assertTrue(changed,'compiler erased the candidate mechanism; no model screen')
 
                     bad=a!=b
@@ -179,14 +193,14 @@ class DeviceContract(unittest.TestCase):
                     offset=t.empty((x.numel()+8,),device='cuda',dtype=t.bfloat16)[8:].view_as(x);offset.copy_(x)
                     self.assertTrue(t.equal(a,op.try_down_cta_order(offset,weight)))
                     noncontiguous=t.empty((4,12288),device='cuda',dtype=t.bfloat16)[:,::2]
-                    self.assertIsNone(op.try_down_cta_order(noncontiguous,weight));self.assertIsNone(op.try_down_cta_order(x[:3],weight))
+                    self.assertIsNone(op.try_down_cta_order(noncontiguous,weight));self.assertTrue(t.equal(linear.linear(x[:3],weight),op.try_down_cta_order(x[:3],weight)))
                     alias=weight.detach()[:4];self.assertTrue(t.equal(linear.linear(alias,weight),op.try_down_cta_order(alias,weight)));self.assertTrue(t.equal(savedw,weight))
                     with t.enable_grad():self.assertIsNone(op.try_down_cta_order(x,weight))
                     old_stamp=op.launch._jit_stamp
                     with patch.object(op.launch,'_jit_stamp',return_value=None):self.assertIsNone(op.try_down_cta_order(x,weight))
                     with patch.object(op.launch,'_valid_dependency',return_value=False):self.assertTrue(t.equal(a,op.try_down_cta_order(x,weight)))
                     self.assertIs(op.launch._jit_stamp,old_stamp)
-                rows.append(dict(layer=layer,shape=[4,6144],weight_type=type(weight).__qualname__,meta=meta,exact=True,fp64=True,cases=4))
+                rows.append(dict(layer=layer,shapes=[[m,6144] for m in (1,2,3,4)],weight_type=type(weight).__qualname__,meta=meta,exact=True,fp64=True,cases=16))
                 (output/'down-cta-order-coverage.json').write_text(json.dumps(rows,indent=2))
                 del weight,w,savedw,cases,original,a,b,x
             op.clear_cache()
